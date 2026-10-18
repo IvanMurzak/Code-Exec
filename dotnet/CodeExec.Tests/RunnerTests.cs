@@ -156,6 +156,62 @@ namespace CodeExecTests
         }
 
         [Fact]
+        public void UninvokableEntryIsARuntimeErrorAndRestoresTheConsole()
+        {
+            var output = Console.Out;
+            var result = Fixtures.Runner().Execute(new ExecuteRequest
+            {
+                Code = "public static class E { public static T Run<T>() => default; }",
+                EntryType = "E",
+                EntryMethod = "Run",
+            });
+            Assert.Equal(ErrorKind.Runtime, result.ErrorKind);
+            Assert.Same(output, Console.Out);
+        }
+
+        [Fact]
+        public void FullSourceModeDoesNotClaimAutoImports()
+        {
+            var result = Fixtures.Runner().Execute(new ExecuteRequest
+            {
+                Code = "public static class E { public static object Run() => new StringBuilder(); }",
+                EntryType = "E",
+                EntryMethod = "Run",
+            });
+            Assert.Equal(ErrorKind.Compile, result.ErrorKind);
+            Assert.Empty(result.AutoImported);
+        }
+
+        [Theory]
+        [InlineData("var a = 1;\n    var b = undefinedThing;", 2, 13)]
+        [InlineData("var a = 1;\na + undefinedThing", 2, 5)]
+        [InlineData("[System.Diagnostics.DebuggerStepThrough] int F() => undefinedThing;\nF()", 1, 53)]
+        public void DiagnosticsKeepTheAgentsColumns(string code, int line, int column)
+        {
+            var result = Fixtures.Runner().Execute(new ExecuteRequest { Code = code, AutoImport = false });
+            Assert.Contains(result.Diagnostics, d => d.Id == "CS0103" && d.File == "snippet.cs" && d.Line == line && d.Column == column);
+        }
+
+        [Fact]
+        public void ExternAliasGoesBeforeTheUsings()
+        {
+            var result = Fixtures.Runner().Execute(new ExecuteRequest { Code = "extern alias Other;\n1" });
+            Assert.DoesNotContain(result.Diagnostics, d => d.Id == "CS0439");
+        }
+
+#if NET8_0_OR_GREATER
+        [Theory]
+        [InlineData("static async IAsyncEnumerable<int> G() { await Task.Yield(); yield return 2; }\nint s = 0;\nawait foreach (var x in G()) s += x;\ns", "2")]
+        [InlineData("long n;\nawait using (var d = new System.IO.MemoryStream()) { n = d.Length; }\nn", "0")]
+        public async Task AwaitForeachAndAwaitUsingMakeTheSnippetAsync(string code, string expected)
+        {
+            var result = await Fixtures.Runner().ExecuteAsync(new ExecuteRequest { Code = code });
+            Assert.True(result.Success, result.Error + string.Join(" | ", result.Diagnostics));
+            Assert.Equal(expected, result.Value);
+        }
+#endif
+
+        [Fact]
         public void EntryMethodWithoutTypeIsInvalid()
         {
             var result = Fixtures.Runner().Execute(new ExecuteRequest { Code = "1", EntryMethod = "Run" });
@@ -209,10 +265,12 @@ namespace CodeExecTests
             static int Alive() => System.Runtime.Loader.AssemblyLoadContext.All.Count(c => c.Name != null && c.Name.StartsWith("CodeExec:"));
         }
 
-        [Fact]
-        public void RuntimeStackTracePointsAtSnippetLines()
+        [Theory]
+        [InlineData("var a = 1;\nthrow new InvalidOperationException(\"x\" + a);")]
+        [InlineData("var a = 0;\n10 / a")]
+        public void RuntimeStackTracePointsAtSnippetLines(string code)
         {
-            var result = Fixtures.Runner().Execute(new ExecuteRequest { Code = "var a = 1;\nthrow new InvalidOperationException(\"x\" + a);" });
+            var result = Fixtures.Runner().Execute(new ExecuteRequest { Code = code });
             Assert.Equal(ErrorKind.Runtime, result.ErrorKind);
             Assert.Contains("snippet.cs:line 2", result.Error);
         }

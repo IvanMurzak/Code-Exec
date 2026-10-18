@@ -110,6 +110,14 @@
       }
     },
     {
+      "name": "attributed-member-becomes-static",
+      "code": "[System.Diagnostics.DebuggerStepThrough] int F() => 6;\nF()",
+      "expect": {
+        "success": true,
+        "value": "6"
+      }
+    },
+    {
       "name": "bare-return",
       "code": "if (DateTime.Now.Year > 2000) return;\nreturn 1;",
       "expect": {

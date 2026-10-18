@@ -58,6 +58,24 @@ class BehaviourTests(unittest.TestCase):
         result = code_exec.run("1", imports=["module_that_does_not_exist_xyz"])
         self.assertEqual("Runtime", result["errorKind"])
 
+    def test_imports_must_be_a_list(self):
+        self.assertEqual("InvalidRequest", code_exec.run("1", imports="os")["errorKind"])
+
+    def test_non_utf8_include_is_an_invalid_request(self):
+        folder = tempfile.mkdtemp()
+        try:
+            path = os.path.join(folder, "latin1.py")
+            with open(path, "wb") as handle:
+                handle.write(b"\xff\xfe = 1\n")
+            result = code_exec.run("1", include=[path])
+            self.assertEqual("InvalidRequest", result["errorKind"])
+            self.assertIn("latin1.py", result["error"])
+        finally:
+            shutil.rmtree(folder)
+
+    def test_null_byte_is_a_compile_error(self):
+        self.assertEqual("Compile", code_exec.run("x = 1\x00")["errorKind"])
+
     def test_system_exit_does_not_escape(self):
         result = code_exec.run("raise SystemExit(3)")
         self.assertEqual("Runtime", result["errorKind"])

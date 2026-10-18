@@ -225,7 +225,12 @@ namespace com.IvanMurzak.CodeExec
             if (run.Pending is Task task)
             {
                 var timeout = prepared.Request.TimeoutMs > 0 ? prepared.Request.TimeoutMs : Timeout.Infinite;
-                var finished = await Task.WhenAny(task, Task.Delay(timeout, cancellationToken));
+                Task finished;
+                using (var delay = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+                {
+                    finished = await Task.WhenAny(task, Task.Delay(timeout, delay.Token));
+                    delay.Cancel(); // the snippet finished first: do not keep the timer alive for the rest of the timeout
+                }
                 if (finished != task)
                     run.Fail(ErrorKind.Timeout, cancellationToken.IsCancellationRequested
                         ? "Canceled while waiting for the snippet's result; the snippet may still be running."
@@ -264,8 +269,10 @@ namespace com.IvanMurzak.CodeExec
                 run.BeginCapture(_options.LogCaptures);
                 run.SetResult(method.ReturnType, method.Invoke(null, prepared.Request.Parameters.Select(p => p.Value).ToArray()));
             }
-            catch (Exception e) when (e is TargetInvocationException || e is ArgumentException || e is BadImageFormatException || e is FileLoadException || e is TypeLoadException)
+            catch (Exception e)
             {
+                // Anything (a generic entry method, a byref-like return, a bad image) is the snippet's failure: Start must
+                // always hand back a run, so Finish restores the log captures and releases the assembly.
                 run.Fail(ErrorKind.Runtime, FormatException(e, run.Loaded?.Assembly));
             }
             return run;

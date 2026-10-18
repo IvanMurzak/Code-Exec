@@ -29,15 +29,18 @@ def run(code, include=(), include_root=None, imports=()):
 
     if not isinstance(code, str) or not code.strip():
         return _fail(result, "InvalidRequest", "code is empty")
+    if isinstance(imports, str):
+        return _fail(result, "InvalidRequest", "imports must be a list of module names")
 
     root = os.path.abspath(include_root or os.getcwd())
     try:
         folders, files = _resolve_include(include, root)
-    except (OSError, ValueError) as error:
+        sources = [(path, _read(full)) for path, full in files]
+    except (OSError, ValueError) as error:  # UnicodeDecodeError (an include that is not UTF-8) is a ValueError
         return _fail(result, "InvalidRequest", str(error))
 
     try:
-        file_code = [compile(_read(full), path, "exec") for path, full in files]
+        file_code = [compile(source, path, "exec") for path, source in sources]
         tree = ast.parse(code, SNIPPET_FILE, "exec")
         last = None
         if tree.body and isinstance(tree.body[-1], ast.Expr):
@@ -55,6 +58,9 @@ def run(code, include=(), include_root=None, imports=()):
         })
         result["compileMs"] = _ms(started)
         return _fail(result, "Compile", "Compilation failed")
+    except ValueError as error:  # null bytes in the source raise ValueError, not SyntaxError, on Python 3.10
+        result["compileMs"] = _ms(started)
+        return _fail(result, "Compile", str(error))
     result["compileMs"] = _ms(started)
 
     executing = time.perf_counter()
@@ -141,8 +147,11 @@ def _ms(since):
 
 
 def _read(path):
-    with io.open(path, "r", encoding="utf-8") as handle:
-        return handle.read()
+    try:
+        with io.open(path, "r", encoding="utf-8") as handle:
+            return handle.read()
+    except UnicodeDecodeError as error:
+        raise ValueError("include is not UTF-8: %s (%s)" % (path, error)) from None
 
 
 def _resolve_include(include, root):

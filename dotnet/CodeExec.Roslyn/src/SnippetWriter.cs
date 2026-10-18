@@ -43,18 +43,18 @@ namespace com.IvanMurzak.CodeExec.Roslyn
             // Body = statements, plus members WITHOUT modifiers: `var x = 1;` (a script field) becomes a local and
             // `int F() => x;` a local function, so both see the snippet's locals. Members with modifiers become static
             // members of the generated class; everything else (types, namespaces) stays top-level.
-            var body = new List<(int Line, SyntaxNode Node, string Text)>();
+            var body = new List<(SyntaxNode Node, string Text)>();
             var members = new List<MemberDeclarationSyntax>();
             var topLevel = new List<MemberDeclarationSyntax>();
             foreach (var member in root.Members)
             {
                 var plain = member.Modifiers.Count == 0 && member.AttributeLists.Count == 0;
                 if (member is GlobalStatementSyntax global)
-                    body.Add((LineOf(member), global.Statement, global.Statement.ToString()));
+                    body.Add((global.Statement, global.Statement.ToString()));
                 else if (plain && member is FieldDeclarationSyntax field)
-                    body.Add((LineOf(member), field, field.Declaration + ";"));
+                    body.Add((field, field.Declaration + ";"));
                 else if (plain && member is MethodDeclarationSyntax method)
-                    body.Add((LineOf(member), method, method.ToString()));
+                    body.Add((method, method.ToString()));
                 else if (member is BaseMethodDeclarationSyntax || member is BasePropertyDeclarationSyntax || member is BaseFieldDeclarationSyntax)
                     members.Add(member);
                 else
@@ -62,21 +62,33 @@ namespace com.IvanMurzak.CodeExec.Roslyn
             }
 
             var sb = new StringBuilder();
+            foreach (var e in root.Externs) // extern aliases must precede every using
+                Emit(sb, e.GetLocation(), e.ToString());
             foreach (var u in usings)
                 sb.Append("using ").Append(u).Append(";\n");
-            foreach (var e in root.Externs)
-                Emit(sb, LineOf(e), e.ToString());
             foreach (var u in root.Usings)
-                Emit(sb, LineOf(u), u.ToString());
+                Emit(sb, u.GetLocation(), u.ToString());
             foreach (var t in topLevel)
-                Emit(sb, LineOf(t), t.ToString());
+                Emit(sb, t.GetLocation(), t.ToString());
 
-            var isAsync = body.Any(s => s.Node.DescendantNodesAndSelf(n => !IsNestedFunction(n)).OfType<AwaitExpressionSyntax>().Any());
+            // `await` expressions, `await foreach` and `await using` all carry the await keyword.
+            var isAsync = body.Any(s => s.Node.DescendantTokens(n => !IsNestedFunction(n)).Any(t => t.IsKind(SyntaxKind.AwaitKeyword)));
             sb.Append("#line hidden\npublic static class ").Append(EntryType).Append("\n{\n");
             foreach (var m in members)
             {
-                var isStatic = m.Modifiers.Any(SyntaxKind.StaticKeyword) || m.Modifiers.Any(SyntaxKind.ConstKeyword);
-                Emit(sb, LineOf(m), (isStatic ? "" : "static ") + m.ToString());
+                var text = m.ToString();
+                if (m.Modifiers.Any(SyntaxKind.StaticKeyword) || m.Modifiers.Any(SyntaxKind.ConstKeyword))
+                {
+                    Emit(sb, m.GetLocation(), text);
+                    continue;
+                }
+                // `static` goes after the attribute lists, on a line of its own, so the member keeps the agent's columns.
+                var rest = m.AttributeLists.Count == 0 ? m.GetFirstToken() : m.AttributeLists.Last().GetLastToken().GetNextToken();
+                var split = rest.SpanStart - m.SpanStart;
+                if (split > 0)
+                    Emit(sb, m.GetLocation(), text.Substring(0, split));
+                Emit(sb, rest.GetLocation(), "static");
+                Emit(sb, rest.GetLocation(), text.Substring(split));
             }
             sb.Append("#line hidden\npublic static ")
                 .Append(isAsync ? "async global::System.Threading.Tasks.Task<object> " : "object ")
@@ -89,32 +101,38 @@ namespace com.IvanMurzak.CodeExec.Roslyn
             TextSpan? returned = null;
             for (var i = 0; i < body.Count; i++)
             {
-                var (line, node, text) = body[i];
+                var (node, text) = body[i];
                 if (node is StatementSyntax statement)
                     text = new BareReturnRewriter().Visit(statement)!.ToString();
                 if (node is ExpressionStatementSyntax expression)
                 {
                     if (returnLastExpression && i == last && (expression.SemicolonToken.IsMissing || !IsStatementExpression(expression.Expression)))
                     {
-                        var start = Emit(sb, line, "return " + expression.Expression + ";") + "return ".Length;
+                        // `return` on a line of its own (same agent line): the expression keeps the agent's columns.
+                        var at = expression.Expression.GetLocation();
+                        Emit(sb, at, "return");
+                        var start = Emit(sb, at, expression.Expression + ";");
                         returned = new TextSpan(start, expression.Expression.ToString().Length);
                         continue;
                     }
                     if (expression.SemicolonToken.IsMissing)
                         text += ";";
                 }
-                Emit(sb, line, text);
+                Emit(sb, node.GetLocation(), text);
             }
             sb.Append("#line hidden\nreturn null;\n}\n}\n");
             return new Output(sb.ToString(), returned);
         }
 
-        static int LineOf(SyntaxNode node) => node.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
-
-        /// <summary>Appends <paramref name="text"/> mapped to the agent's line; returns where the text starts.</summary>
-        static int Emit(StringBuilder sb, int line, string text)
+        /// <summary>
+        /// Appends <paramref name="text"/> mapped to the agent's line, indented to the agent's column so diagnostics keep
+        /// both; returns where the text starts.
+        /// </summary>
+        static int Emit(StringBuilder sb, Location at, string text)
         {
-            sb.Append("#line ").Append(line).Append(" \"").Append(RoslynCSharpCompiler.SnippetFile).Append("\"\n");
+            var position = at.GetLineSpan().StartLinePosition;
+            sb.Append("#line ").Append(position.Line + 1).Append(" \"").Append(RoslynCSharpCompiler.SnippetFile).Append("\"\n");
+            sb.Append(' ', position.Character);
             var start = sb.Length;
             sb.Append(text).Append('\n');
             return start;

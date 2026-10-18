@@ -73,9 +73,11 @@ namespace com.IvanMurzak.CodeExec.Roslyn
                 // The trailing expression is a void call: run it as a plain statement, the result is null.
                 var plain = Parse(SnippetWriter.Write(request.Code, request.Usings, request.Parameters, returnLastExpression: false).Source, GeneratedFile);
                 compilation = compilation.ReplaceSyntaxTree(trees[0], plain);
+                trees[0] = plain;
             }
 
-            var result = Emit(compilation);
+            // Auto-import can only add usings to the generated snippet: full-source code and includes are compiled verbatim.
+            var result = Emit(compilation, snippet != null ? trees[0] : null);
             result.EntryType = entryType;
             result.EntryMethod = entryMethod;
             return result;
@@ -91,7 +93,7 @@ namespace com.IvanMurzak.CodeExec.Roslyn
                 && compilation.GetSemanticModel(tree).GetTypeInfo(expression).Type?.SpecialType == SpecialType.System_Void;
         }
 
-        static CompileResult Emit(CSharpCompilation compilation)
+        static CompileResult Emit(CSharpCompilation compilation, SyntaxTree? importable)
         {
             using (var image = new MemoryStream())
             using (var symbols = new MemoryStream())
@@ -105,8 +107,8 @@ namespace com.IvanMurzak.CodeExec.Roslyn
                     Symbols = emit.Success ? symbols.ToArray() : null,
                     Diagnostics = errors.Select(ToDiagnostic).ToList(),
                     UnresolvedNames = errors
-                        .Where(d => (d.Id == "CS0246" || d.Id == "CS0103") && d.Location.SourceTree != null)
-                        .Select(d => d.Location.SourceTree!.GetRoot().FindNode(d.Location.SourceSpan, getInnermostNodeForTie: true))
+                        .Where(d => (d.Id == "CS0246" || d.Id == "CS0103") && importable != null && d.Location.SourceTree == importable)
+                        .Select(d => importable!.GetRoot().FindNode(d.Location.SourceSpan, getInnermostNodeForTie: true))
                         .Select(n => n as SimpleNameSyntax ?? n.DescendantNodesAndSelf().OfType<SimpleNameSyntax>().FirstOrDefault())
                         .Where(n => n != null)
                         .Select(n => n!.Identifier.ValueText)
