@@ -1,0 +1,106 @@
+fixtures/golden/python.json
+  s_a4bd5ddb53fd2d::t_8f714c06a54132 1-23
+fixtures/include/csharp/Broken.cs
+  s_a4bd5ddb53fd2d::t_837ccce5f44040 1
+fixtures/include/csharp/geo/inner/Cube.cs
+  s_a4bd5ddb53fd2d::t_837ccce5f44040 1-7
+fixtures/include/python/geo/geo_helpers.py
+  s_a4bd5ddb53fd2d::t_837ccce5f44040 1-2
+fixtures/golden/csharp.json
+  s_a4bd5ddb53fd2d::t_d59c18ce3477ff 1-34
+dotnet/samples/PackageConsumer/PackageConsumer.csproj
+  s_a4bd5ddb53fd2d::t_00d334cf8bef83 1-2,5-11,13-25
+  s_a4bd5ddb53fd2d::t_946395b793a3ef 3-4,12
+dotnet/CodeExec/CodeRunner.cs
+  s_a4bd5ddb53fd2d::t_48e75a71d00304 1-452
+dotnet/samples/PackageConsumer/Program.cs
+  s_a4bd5ddb53fd2d::t_946395b793a3ef 1
+  s_a4bd5ddb53fd2d::t_00d334cf8bef83 2-8
+python/code_exec/runner.py
+  s_a4bd5ddb53fd2d::t_9b7a2334cd4fc2 6,69,73-77,94
+  s_a4bd5ddb53fd2d::t_ce611bee988a9f 78-79
+  s_a4bd5ddb53fd2d::t_a853f7fb3c6c22 1-5,7-68,70-72,80-93,95-245
+dotnet/CodeExec.slnx
+  s_a4bd5ddb53fd2d::t_79491a176ca04b 1-5
+scripts/test-all.sh
+  s_a4bd5ddb53fd2d::t_4bdc14bec189a2 1-14
+  s_a4bd5ddb53fd2d::t_4a92e850b7a1ac 15-20
+dotnet/Directory.Build.props
+  s_a4bd5ddb53fd2d::t_d7f3fc3378c60a 1-20
+dotnet/CodeExec.Tests/CodeExec.Tests.csproj
+  s_a4bd5ddb53fd2d::t_53727909d314ea 1-21,23-28
+  s_a4bd5ddb53fd2d::t_01d6ee7c4d6147 22
+scripts/pack.sh
+  s_a4bd5ddb53fd2d::t_00d334cf8bef83 1-17,19-22
+  s_a4bd5ddb53fd2d::t_946395b793a3ef 18
+fixtures/include/python/prelude.py
+  s_a4bd5ddb53fd2d::t_837ccce5f44040 1
+spec/contract.md
+  s_a4bd5ddb53fd2d::t_79491a176ca04b 1-81
+python/tests/test_code_exec.py
+  s_a4bd5ddb53fd2d::t_c2487474ff7d8a 1-103
+.github/workflows/release.yml
+  s_a4bd5ddb53fd2d::t_fb0449b69c25d7 1-156
+dotnet/CodeExec.Tests/GoldenTests.cs
+  s_a4bd5ddb53fd2d::t_6b22a5286e8e7b 17,20,26,39
+  s_a4bd5ddb53fd2d::t_99bfd5ac95048e 1-16,18-19,21-25,27-38,40-86
+fixtures/include/python/geo/inner/cube_helpers.py
+  s_a4bd5ddb53fd2d::t_837ccce5f44040 1-5
+dotnet/PACKAGE.md
+  s_a4bd5ddb53fd2d::t_87bf475da99481 1-20
+dotnet/CodeExec/References.cs
+  s_a4bd5ddb53fd2d::t_71aa3fd008cada 1-59
+python/code_exec/__init__.py
+  s_a4bd5ddb53fd2d::t_1b764cc230a9ea 1-14
+dotnet/CodeExec.Roslyn/build/com.IvanMurzak.CodeExec.Roslyn.props
+  s_a4bd5ddb53fd2d::t_b09692a49a4f93 1-7
+.github/workflows/ci.yml
+  s_a4bd5ddb53fd2d::t_4bdc14bec189a2 1-94
+AGENTS.md
+  s_a4bd5ddb53fd2d::t_ab28083ed052b3 1-30
+fixtures/include/python/broken.py
+  s_a4bd5ddb53fd2d::t_837ccce5f44040 1-2
+dotnet/CodeExec.Tests/RunnerTests.cs
+  s_a4bd5ddb53fd2d::t_55b7826fd6d614 1-213
+dotnet/CodeExec.Roslyn/src/SnippetWriter.cs
+  s_a4bd5ddb53fd2d::t_691f7bc8a11058 1-74,76-134
+  s_a4bd5ddb53fd2d::t_fff76373cccdb6 75
+dotnet/CodeExec.Roslyn/CodeExec.Roslyn.csproj
+  s_a4bd5ddb53fd2d::t_b09692a49a4f93 1-40
+README.md
+  s_a4bd5ddb53fd2d::t_35f6442fe75a9a 3-5,7-84
+fixtures/include/csharp/geo/Geo.cs
+  s_a4bd5ddb53fd2d::t_837ccce5f44040 1-7
+dotnet/CodeExec/Contracts.cs
+  s_a4bd5ddb53fd2d::t_b6dd0fda69a58f 1-103
+dotnet/CodeExec/CodeExec.csproj
+  s_a4bd5ddb53fd2d::t_d7f3fc3378c60a 1-24
+dotnet/CodeExec/Support.cs
+  s_a4bd5ddb53fd2d::t_b4452575873bb8 1-188
+dotnet/CodeExec.Roslyn/src/RoslynCSharpCompiler.cs
+  s_a4bd5ddb53fd2d::t_3fafd94bace3a0 1-150
+dotnet/CodeExec/Compilation.cs
+  s_a4bd5ddb53fd2d::t_6f87b2ab1ea24c 1-74
+dotnet/CodeExec/Hosting.cs
+  s_a4bd5ddb53fd2d::t_51824f517e2fe8 72
+  s_a4bd5ddb53fd2d::t_038a7c55b44bd1 99-113
+  s_a4bd5ddb53fd2d::t_ce6034026b91df 3
+  s_a4bd5ddb53fd2d::t_91763aac9d4d3b 1-2,4-29,40-71,73-98,114-126
+  s_a4bd5ddb53fd2d::t_f3e40735156809 30-39
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b6ef8ba3e46a8ef006b8634cc646238728c86cc2",
+  "prompts": {},
+  "sessions": {
+    "s_a4bd5ddb53fd2d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "97ee1b50-e171-4dcb-8ce1-b70a7701b61f",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}
