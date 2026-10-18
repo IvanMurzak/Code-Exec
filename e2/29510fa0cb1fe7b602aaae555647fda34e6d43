@@ -1,0 +1,58 @@
+dotnet/CodeExec/Hosting.cs
+  s_a4bd5ddb53fd2d::t_7a8dace859e405 1
+spec/contract.md
+  s_a4bd5ddb53fd2d::t_bb7031237975c5 26,49-50
+.github/workflows/ci.yml
+  s_a4bd5ddb53fd2d::t_2975680c5ec09d 73-74
+dotnet/samples/SourceConsumer/SourceConsumer.csproj
+  s_a4bd5ddb53fd2d::t_e3bfa848884e61 1-19
+dotnet/CodeExec/Compilation.cs
+  s_a4bd5ddb53fd2d::t_7a8dace859e405 1
+dotnet/CodeExec.Roslyn/src/SnippetWriter.cs
+  s_a4bd5ddb53fd2d::t_3ba58ee16fe773 93-99,101-103
+  s_a4bd5ddb53fd2d::t_296060857c557a 130
+  s_a4bd5ddb53fd2d::t_d81481728d1125 112,116
+dotnet/CodeExec/References.cs
+  s_a4bd5ddb53fd2d::t_7a8dace859e405 1
+dotnet/CodeExec/Contracts.cs
+  s_a4bd5ddb53fd2d::t_aff4e4950f5c40 93-98
+  s_a4bd5ddb53fd2d::t_7a8dace859e405 1
+dotnet/CodeExec.Tests/GoldenTests.cs
+  s_a4bd5ddb53fd2d::t_bb7031237975c5 52-53
+dotnet/samples/PackageConsumer/PackageConsumer.csproj
+  s_a4bd5ddb53fd2d::t_7a8dace859e405 14
+dotnet/CodeExec/Support.cs
+  s_a4bd5ddb53fd2d::t_7a8dace859e405 1
+fixtures/golden/csharp.json
+  s_a4bd5ddb53fd2d::t_bb7031237975c5 9-10,102-103,127-146,154-155,163-164,188-189,321-322
+dotnet/Directory.Build.props
+  s_a4bd5ddb53fd2d::t_7a8dace859e405 9
+scripts/test-all.sh
+  s_a4bd5ddb53fd2d::t_2975680c5ec09d 12-13
+dotnet/CodeExec/CodeRunner.cs
+  s_a4bd5ddb53fd2d::t_4cb89d6001afbe 283-293
+  s_a4bd5ddb53fd2d::t_7a8dace859e405 1
+  s_a4bd5ddb53fd2d::t_7bb175a9ce7aa8 270
+  s_a4bd5ddb53fd2d::t_4939411c195c17 441
+  s_a4bd5ddb53fd2d::t_4bc42979aeeae3 507
+AGENTS.md
+  s_a4bd5ddb53fd2d::t_2975680c5ec09d 13,18-19
+python/code_exec/__init__.py
+  s_a4bd5ddb53fd2d::t_7a8dace859e405 14
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e229510fa0cb1fe7b602aaae555647fda34e6d43",
+  "prompts": {},
+  "sessions": {
+    "s_a4bd5ddb53fd2d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "97ee1b50-e171-4dcb-8ce1-b70a7701b61f",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}
