@@ -7,7 +7,15 @@
       "expect": {
         "success": true,
         "value": "3",
-        "returnType": "System.Object"
+        "returnType": "System.Int32"
+      }
+    },
+    {
+      "name": "result-type-generic",
+      "code": "new List<int> { 1, 2 }",
+      "expect": {
+        "success": true,
+        "returnType": "System.Collections.Generic.List<System.Int32>"
       }
     },
     {
@@ -186,7 +194,7 @@
       "expect": {
         "success": true,
         "value": "6",
-        "returnType": "System.Object"
+        "returnType": "System.Int32"
       }
     },
     {

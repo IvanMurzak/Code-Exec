@@ -1,4 +1,4 @@
-# Code-Exec contract (v0.1)
+# Code-Exec contract (v0.2)
 
 One request/response shape for every runtime (C# and Python) and every host (Unity, Godot, BRUTAL, Unreal, plain
 .NET). **This file is normative: a runtime that disagrees with it is the bug.** Behaviour changes start here, then
@@ -23,7 +23,7 @@ One request/response shape for every runtime (C# and Python) and every host (Uni
 |---|---|---|
 | `success` | bool | |
 | `value` | any | The result, converted by the host **before** the snippet's code is unloaded. `null` when there is none. |
-| `returnType` | string | C# only. Declared result type of the entry point (`Task<T>` → `T`): `System.Void` when the snippet returns nothing, `System.Object` when a snippet returns a value, the method's type in full-source mode. |
+| `returnType` | string | C# only. Result type, `Task<T>` → `T`: `System.Void` when nothing is returned; for a snippet whose result is its last expression, that expression's static type (`System.Int32`, `System.Collections.Generic.List<System.Int32>`); `System.Object` when a snippet returns through `return value;` statements; the method's type in full-source mode. |
 | `logs` | `{ level, message }[]` | Output written while the snippet ran (`Console`, `print`, engine log hooks). |
 | `errorKind` | enum | `None`, `InvalidRequest`, `Compile`, `EntryPointNotFound`, `Runtime`, `Timeout`, `NotAvailable`. |
 | `error` | string | Human-readable error; for `Runtime`: `ExceptionType: message` plus the snippet's stack frames. |
@@ -84,3 +84,8 @@ identical requests reuse the already-loaded assembly (cache).
 
 ## 5. Value text in golden tests
 Golden fixtures compare `value` as text: C# `ToString()` (`True`, `42`), Python `str()` (`True`, `42`).
+
+## Changelog
+
+- **v0.2** — `returnType` (C#). A snippet that returns nothing compiles to a `void` (or `async Task`) entry method.
+- **v0.1** — first contract.

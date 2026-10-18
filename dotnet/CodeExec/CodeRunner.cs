@@ -201,7 +201,7 @@ namespace com.IvanMurzak.CodeExec
                 return new PreparedSnippet(request, failure, null, false, failure.CompileMs);
             }
 
-            var entry = new CacheEntry(compileRequest.AssemblyName, compiled.Image, compiled.Symbols, compiled.EntryType, compiled.EntryMethod, autoImported);
+            var entry = new CacheEntry(compileRequest.AssemblyName, compiled, autoImported);
             ToCache(key, entry);
             return new PreparedSnippet(request, null, entry, false, stopwatch.ElapsedMilliseconds);
         }
@@ -267,9 +267,10 @@ namespace com.IvanMurzak.CodeExec
                     return run;
                 }
 
-                run.ReturnType = ResultTypeName(method.ReturnType);
+                var declared = new DeclaredResult(method.ReturnType);
+                run.ReturnType = entry.ResultType ?? declared.YieldsName; // the compiler knows a snippet's real result type
                 run.BeginCapture(_options.LogCaptures);
-                run.SetResult(method.ReturnType, method.Invoke(null, prepared.Request.Parameters.Select(p => p.Value).ToArray()));
+                run.SetResult(declared, method.Invoke(null, prepared.Request.Parameters.Select(p => p.Value).ToArray()));
             }
             catch (Exception e)
             {
@@ -280,15 +281,39 @@ namespace com.IvanMurzak.CodeExec
             return run;
         }
 
-        /// <summary>The declared result type: <c>Task</c> / <c>ValueTask</c> → <c>System.Void</c>, <c>Task&lt;T&gt;</c> / <c>ValueTask&lt;T&gt;</c> → <c>T</c>.</summary>
-        static string ResultTypeName(Type declared)
+        /// <summary>
+        /// The entry point's declared result, classified once: awaitable or not (Task, Task&lt;T&gt;, ValueTask, ValueTask&lt;T&gt;)
+        /// and the type it yields (<c>Task</c> → <c>void</c>, <c>Task&lt;T&gt;</c> → <c>T</c>).
+        /// </summary>
+        internal readonly struct DeclaredResult
         {
-            var name = (declared.IsGenericType ? declared.GetGenericTypeDefinition() : declared).FullName;
-            if (name == "System.Threading.Tasks.Task" || name == "System.Threading.Tasks.ValueTask")
-                return typeof(void).FullName!;
-            if (name == "System.Threading.Tasks.Task`1" || name == "System.Threading.Tasks.ValueTask`1")
-                return declared.GetGenericArguments()[0].FullName ?? declared.GetGenericArguments()[0].Name;
-            return declared.FullName ?? declared.Name;
+            public DeclaredResult(Type declared)
+            {
+                Declared = declared;
+                var generic = declared.IsGenericType ? declared.GetGenericTypeDefinition() : null;
+                var name = (generic ?? declared).FullName;
+                // ValueTask is not part of netstandard2.0: recognise it by name.
+                IsValueTask = name == "System.Threading.Tasks.ValueTask" || name == "System.Threading.Tasks.ValueTask`1";
+                IsTask = IsValueTask || typeof(Task).IsAssignableFrom(declared);
+                HasResult = IsTask && generic != null;
+                Yields = !IsTask ? declared : HasResult ? declared.GetGenericArguments()[0] : typeof(void);
+            }
+
+            public Type Declared { get; }
+            public bool IsTask { get; }
+            public bool IsValueTask { get; }
+            public bool HasResult { get; }
+            public Type Yields { get; }
+
+            /// <summary><c>System.Int32</c>, <c>System.Collections.Generic.List&lt;System.Int32&gt;</c> (same shape as the compiler's).</summary>
+            public string YieldsName
+            {
+                get
+                {
+                    try { return TypeNames.ToCSharp(Yields).Replace("global::", ""); }
+                    catch (ArgumentException) { return Yields.FullName ?? Yields.Name; } // by-ref / pointer results
+                }
+            }
         }
 
         /// <summary><c>Type: message</c> plus only the stack frames of the snippet's own assembly (snippet and includes).</summary>
@@ -394,13 +419,14 @@ namespace com.IvanMurzak.CodeExec
 
         internal sealed class CacheEntry
         {
-            public CacheEntry(string assemblyName, byte[] image, byte[]? symbols, string entryType, string entryMethod, IReadOnlyList<string> autoImported)
+            public CacheEntry(string assemblyName, CompileResult compiled, IReadOnlyList<string> autoImported)
             {
                 AssemblyName = assemblyName;
-                Image = image;
-                Symbols = symbols;
-                EntryType = entryType;
-                EntryMethod = entryMethod;
+                Image = compiled.Image;
+                Symbols = compiled.Symbols;
+                EntryType = compiled.EntryType;
+                EntryMethod = compiled.EntryMethod;
+                ResultType = compiled.ResultType;
                 AutoImported = autoImported;
             }
 
@@ -411,6 +437,7 @@ namespace com.IvanMurzak.CodeExec
             public byte[]? Symbols { get; set; }
             public string EntryType { get; }
             public string EntryMethod { get; }
+            public string? ResultType { get; }
             public IReadOnlyList<string> AutoImported { get; }
 
             /// <summary>Set only for hosts that cannot unload (Mono): the assembly is loaded once and reused.</summary>
@@ -443,19 +470,15 @@ namespace com.IvanMurzak.CodeExec
             /// <summary>The snippet's task while its result is still to come; null for synchronous results.</summary>
             public Task? Pending { get; private set; }
 
-            /// <summary>Records the invocation result, judged by the DECLARED return type (Task, Task&lt;T&gt;, ValueTask, ValueTask&lt;T&gt;).</summary>
-            public void SetResult(Type declared, object? raw)
+            /// <summary>Records the invocation result, judged by the DECLARED return type: awaitables become the task to await.</summary>
+            public void SetResult(DeclaredResult declared, object? raw)
             {
-                var generic = declared.IsGenericType ? declared.GetGenericTypeDefinition() : null;
-                var name = (generic ?? declared).FullName;
-                // ValueTask is not part of netstandard2.0: recognise it by name and turn it into a Task.
-                var isValueTask = name == "System.Threading.Tasks.ValueTask" || name == "System.Threading.Tasks.ValueTask`1";
-                if (raw != null && isValueTask)
-                    raw = declared.GetMethod("AsTask", Type.EmptyTypes)!.Invoke(raw, null);
-                if (raw is Task task && (isValueTask || typeof(Task).IsAssignableFrom(declared)))
+                if (raw != null && declared.IsValueTask)
+                    raw = declared.Declared.GetMethod("AsTask", Type.EmptyTypes)!.Invoke(raw, null);
+                if (raw is Task task && declared.IsTask)
                 {
                     _task = task;
-                    _taskHasResult = generic != null;
+                    _taskHasResult = declared.HasResult;
                     Pending = task.IsCompleted ? null : task;
                 }
                 _raw = raw;

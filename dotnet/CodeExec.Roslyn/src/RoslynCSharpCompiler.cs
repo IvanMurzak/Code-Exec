@@ -68,29 +68,44 @@ namespace com.IvanMurzak.CodeExec.Roslyn
                     .WithOptimizationLevel(OptimizationLevel.Debug)
                     .WithAssemblyIdentityComparer(DesktopAssemblyIdentityComparer.Default));
 
-            if (snippet?.ReturnedExpression is { } span && ReturnsVoid(compilation, trees[0], span))
+            string? resultType = null;
+            if (snippet?.ReturnedExpression is { } span)
             {
-                // The trailing expression is a void call: run it as a plain statement, the result is null.
-                var plain = Parse(SnippetWriter.Write(request.Code, request.Usings, request.Parameters, returnLastExpression: false).Source, GeneratedFile);
-                compilation = compilation.ReplaceSyntaxTree(trees[0], plain);
-                trees[0] = plain;
+                var tailType = TypeAt(compilation, trees[0], span);
+                if (tailType?.SpecialType == SpecialType.System_Void)
+                {
+                    // The trailing expression is a void call: run it as a plain statement, the result is null.
+                    var plain = Parse(SnippetWriter.Write(request.Code, request.Usings, request.Parameters, returnLastExpression: false).Source, GeneratedFile);
+                    compilation = compilation.ReplaceSyntaxTree(trees[0], plain);
+                    trees[0] = plain;
+                }
+                else if (tailType != null && tailType.TypeKind != TypeKind.Error && !snippet.HasOtherReturns)
+                {
+                    resultType = tailType.ToDisplayString(ResultTypeFormat); // the tail is the only result: report its type
+                }
             }
 
             // Auto-import can only add usings to the generated snippet: full-source code and includes are compiled verbatim.
             var result = Emit(compilation, snippet != null ? trees[0] : null);
             result.EntryType = entryType;
             result.EntryMethod = entryMethod;
+            result.ResultType = resultType;
             return result;
         }
 
+        /// <summary>`System.Int32`, `System.Collections.Generic.List&lt;System.Int32&gt;`: namespaces, no keyword aliases.</summary>
+        static readonly SymbolDisplayFormat ResultTypeFormat = new SymbolDisplayFormat(
+            typeQualificationStyle: SymbolDisplayTypeQualificationStyle.NameAndContainingTypesAndNamespaces,
+            genericsOptions: SymbolDisplayGenericsOptions.IncludeTypeParameters,
+            miscellaneousOptions: SymbolDisplayMiscellaneousOptions.ExpandNullable);
+
         static SyntaxTree Parse(string text, string path) => CSharpSyntaxTree.ParseText(text, ParseOptions, path, Encoding.UTF8);
 
-        static bool ReturnsVoid(CSharpCompilation compilation, SyntaxTree tree, Microsoft.CodeAnalysis.Text.TextSpan span)
+        static ITypeSymbol? TypeAt(CSharpCompilation compilation, SyntaxTree tree, Microsoft.CodeAnalysis.Text.TextSpan span)
         {
             var node = tree.GetRoot().FindNode(span, getInnermostNodeForTie: true);
             var expression = node as ExpressionSyntax ?? node.FirstAncestorOrSelf<ExpressionSyntax>();
-            return expression != null
-                && compilation.GetSemanticModel(tree).GetTypeInfo(expression).Type?.SpecialType == SpecialType.System_Void;
+            return expression == null ? null : compilation.GetSemanticModel(tree).GetTypeInfo(expression).Type;
         }
 
         static CompileResult Emit(CSharpCompilation compilation, SyntaxTree? importable)

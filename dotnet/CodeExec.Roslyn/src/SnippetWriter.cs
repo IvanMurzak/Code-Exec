@@ -23,16 +23,20 @@ namespace com.IvanMurzak.CodeExec.Roslyn
 
         internal sealed class Output
         {
-            public Output(string source, TextSpan? returnedExpression)
+            public Output(string source, TextSpan? returnedExpression, bool hasOtherReturns)
             {
                 Source = source;
                 ReturnedExpression = returnedExpression;
+                HasOtherReturns = hasOtherReturns;
             }
 
             public string Source { get; }
 
             /// <summary>Where the expression turned into the result sits in <see cref="Source"/>, if one was.</summary>
             public TextSpan? ReturnedExpression { get; }
+
+            /// <summary>The snippet also has `return value;` statements, so the result type is not just the tail's.</summary>
+            public bool HasOtherReturns { get; }
         }
 
         public static Output Write(string code, IReadOnlyList<string> usings, IReadOnlyList<ParameterDeclaration> parameters, bool returnLastExpression)
@@ -71,8 +75,17 @@ namespace com.IvanMurzak.CodeExec.Roslyn
             foreach (var t in topLevel)
                 Emit(sb, t.GetLocation(), t.ToString());
 
-            // `await` expressions, `await foreach` and `await using` all carry the await keyword.
-            var isAsync = body.Any(s => s.Node.DescendantTokens(n => !IsNestedFunction(n)).Any(t => t.IsKind(SyntaxKind.AwaitKeyword)));
+            // One pass over the snippet's own scope (nested functions have their own `return` / `await`): `await`
+            // expressions, `await foreach` and `await using` all carry the await keyword.
+            bool isAsync = false, hasValueReturns = false;
+            foreach (var (node, _) in body)
+            {
+                foreach (var item in node.DescendantNodesAndTokensAndSelf(n => !IsNestedFunction(n)))
+                {
+                    isAsync |= item.IsKind(SyntaxKind.AwaitKeyword);
+                    hasValueReturns |= item.AsNode() is ReturnStatementSyntax { Expression: { } };
+                }
+            }
             sb.Append("#line hidden\npublic static class ").Append(EntryType).Append("\n{\n");
             foreach (var m in members)
             {
@@ -95,12 +108,11 @@ namespace com.IvanMurzak.CodeExec.Roslyn
             var last = body.FindLastIndex(s => !(s.Node is MethodDeclarationSyntax));
             var lastIsResult = returnLastExpression && last >= 0 && body[last].Node is ExpressionStatementSyntax tail
                 && (tail.SemicolonToken.IsMissing || !IsStatementExpression(tail.Expression));
-            var returnsValue = lastIsResult || body.Any(s => s.Node is StatementSyntax
-                && s.Node.DescendantNodesAndSelf(n => !IsNestedFunction(n)).OfType<ReturnStatementSyntax>().Any(r => r.Expression != null));
+            var returnsValue = lastIsResult || hasValueReturns;
             sb.Append("#line hidden\npublic static ")
                 .Append(isAsync
-                    ? (returnsValue ? "async global::System.Threading.Tasks.Task<object> " : "async global::System.Threading.Tasks.Task ")
-                    : (returnsValue ? "object " : "void "))
+                    ? "async global::System.Threading.Tasks.Task" + (returnsValue ? "<object> " : " ")
+                    : returnsValue ? "object " : "void ")
                 .Append(EntryMethod).Append('(')
                 .Append(string.Join(", ", parameters.Select(p => p.TypeName + " " + p.Name)))
                 .Append(")\n{\n");
@@ -127,8 +139,11 @@ namespace com.IvanMurzak.CodeExec.Roslyn
                 }
                 Emit(sb, node.GetLocation(), text);
             }
-            sb.Append(returnsValue ? "#line hidden\nreturn null;\n}\n}\n" : "}\n}\n");
-            return new Output(sb.ToString(), returned);
+            sb.Append("#line hidden\n");
+            if (returnsValue)
+                sb.Append("return null;\n");
+            sb.Append("}\n}\n");
+            return new Output(sb.ToString(), returned, hasValueReturns);
         }
 
         /// <summary>
