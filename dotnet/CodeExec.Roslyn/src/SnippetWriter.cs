@@ -35,7 +35,7 @@ namespace com.IvanMurzak.CodeExec.Roslyn
             /// <summary>Where the expression turned into the result sits in <see cref="Source"/>, if one was.</summary>
             public TextSpan? ReturnedExpression { get; }
 
-            /// <summary>The snippet also has `return value;` statements, so the result type is not just the tail's.</summary>
+            /// <summary>The snippet also has `return` statements (`return;` = `return null;`), so the result type is not just the tail's.</summary>
             public bool HasOtherReturns { get; }
         }
 
@@ -77,13 +77,17 @@ namespace com.IvanMurzak.CodeExec.Roslyn
 
             // One pass over the snippet's own scope (nested functions have their own `return` / `await`): `await`
             // expressions, `await foreach` and `await using` all carry the await keyword.
-            bool isAsync = false, hasValueReturns = false;
+            bool isAsync = false, hasValueReturns = false, hasReturns = false;
             foreach (var (node, _) in body)
             {
                 foreach (var item in node.DescendantNodesAndTokensAndSelf(n => !IsNestedFunction(n)))
                 {
                     isAsync |= item.IsKind(SyntaxKind.AwaitKeyword);
-                    hasValueReturns |= item.AsNode() is ReturnStatementSyntax { Expression: { } };
+                    if (item.AsNode() is ReturnStatementSyntax ret)
+                    {
+                        hasReturns = true;
+                        hasValueReturns |= ret.Expression != null;
+                    }
                 }
             }
             sb.Append("#line hidden\npublic static class ").Append(EntryType).Append("\n{\n");
@@ -143,7 +147,8 @@ namespace com.IvanMurzak.CodeExec.Roslyn
             if (returnsValue)
                 sb.Append("return null;\n");
             sb.Append("}\n}\n");
-            return new Output(sb.ToString(), returned, hasValueReturns);
+            // A bare `return;` beside a result tail is a `return null;`: the tail is not the only result either.
+            return new Output(sb.ToString(), returned, hasReturns);
         }
 
         /// <summary>

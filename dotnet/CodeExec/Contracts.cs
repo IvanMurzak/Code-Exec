@@ -91,8 +91,9 @@ namespace com.IvanMurzak.CodeExec
         public object? Value { get; set; }
 
         /// <summary>
-        /// Declared result type of the entry point (<c>Task&lt;T&gt;</c> → <c>T</c>): <c>System.Void</c> when nothing is
-        /// returned, <c>System.Object</c> for a snippet that returns a value. Null when the entry point was never reached.
+        /// Result type, <c>Task&lt;T&gt;</c> → <c>T</c>: <c>System.Void</c> when nothing is returned; the static type of a
+        /// snippet's result expression (<c>System.Int32</c>); <c>System.Object</c> for a snippet that returns through
+        /// <c>return</c> statements; the method's type in full-source mode. Null when the entry point was never reached.
         /// </summary>
         public string? ReturnType { get; set; }
 

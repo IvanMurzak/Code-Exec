@@ -19,6 +19,14 @@
       }
     },
     {
+      "name": "result-type-tuple-is-object",
+      "code": "(1, \"a\")",
+      "expect": {
+        "success": true,
+        "returnType": "System.Object"
+      }
+    },
+    {
       "name": "statements-then-expression",
       "code": "var x = 21;\nx * 2",
       "expect": {
@@ -133,6 +141,15 @@
       "expect": {
         "success": true,
         "value": null,
+        "returnType": "System.Object"
+      }
+    },
+    {
+      "name": "tail-with-bare-return",
+      "code": "if (DateTime.Now.Year < 2000) return;\n1 + 2",
+      "expect": {
+        "success": true,
+        "value": "3",
         "returnType": "System.Object"
       }
     },
@@ -315,6 +332,19 @@
       "expect": {
         "success": true,
         "value": "7"
+      }
+    },
+    {
+      "name": "full-source-task-result",
+      "code": "public static class Entry { public static async System.Threading.Tasks.Task<int> Run() { await System.Threading.Tasks.Task.Yield(); return 9; } }",
+      "entry": {
+        "type": "Entry",
+        "method": "Run"
+      },
+      "expect": {
+        "success": true,
+        "value": "9",
+        "returnType": "System.Int32"
       }
     },
     {

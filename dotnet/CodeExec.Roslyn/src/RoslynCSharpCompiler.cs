@@ -79,7 +79,9 @@ namespace com.IvanMurzak.CodeExec.Roslyn
                     compilation = compilation.ReplaceSyntaxTree(trees[0], plain);
                     trees[0] = plain;
                 }
-                else if (tailType != null && tailType.TypeKind != TypeKind.Error && !snippet.HasOtherReturns)
+                // Tuples, anonymous types and dynamic have no namespace-qualified name: they stay System.Object.
+                else if (tailType != null && tailType.TypeKind != TypeKind.Error && tailType.TypeKind != TypeKind.Dynamic
+                    && !tailType.IsTupleType && !tailType.IsAnonymousType && !snippet.HasOtherReturns)
                 {
                     resultType = tailType.ToDisplayString(ResultTypeFormat); // the tail is the only result: report its type
                 }
