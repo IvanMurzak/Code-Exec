@@ -70,6 +70,11 @@ jobs:
             10.0.x
       - name: Pack and check the packages' shape
         run: scripts/pack.sh packages
+      - name: "Compile Core + adapter as source (C# 9, netstandard2.0, as Unity vendors them)"
+        run: |
+          for v in 3.8.0 4.8.0; do
+            dotnet build dotnet/samples/SourceConsumer/SourceConsumer.csproj -c Release -p:RoslynVersion=$v
+          done
       - name: Consume the packages (Roslyn 3.8.0 and 5.9.0)
         run: scripts/consume.sh 3.8.0 5.9.0
 

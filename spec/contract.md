@@ -1,4 +1,4 @@
-# Code-Exec contract (v0.1)
+# Code-Exec contract (v0.2)
 
 One request/response shape for every runtime (C# and Python) and every host (Unity, Godot, BRUTAL, Unreal, plain
 .NET). **This file is normative: a runtime that disagrees with it is the bug.** Behaviour changes start here, then
@@ -23,6 +23,7 @@ One request/response shape for every runtime (C# and Python) and every host (Uni
 |---|---|---|
 | `success` | bool | |
 | `value` | any | The result, converted by the host **before** the snippet's code is unloaded. `null` when there is none. |
+| `returnType` | string | C# only. Result type, `Task<T>` → `T`: `System.Void` when nothing is returned; for a snippet whose result is its last expression, that expression's static type (`System.Int32`, `System.Collections.Generic.List<System.Int32>`); `System.Object` when a snippet (also) returns through `return` statements, `return;` included; the method's type in full-source mode. |
 | `logs` | `{ level, message }[]` | Output written while the snippet ran (`Console`, `print`, engine log hooks). |
 | `errorKind` | enum | `None`, `InvalidRequest`, `Compile`, `EntryPointNotFound`, `Runtime`, `Timeout`, `NotAvailable`. |
 | `error` | string | Human-readable error; for `Runtime`: `ExceptionType: message` plus the snippet's stack frames. |
@@ -45,7 +46,8 @@ The snippet is parsed as C# **script** code and rewritten into one ordinary comp
 - the **last statement** (trailing local functions aside), when it is an expression without `;`, or an expression that
   is not a valid statement (`x * 2;`), is returned; if that expression is `void`, it runs as a plain statement and the
   result is `null`;
-- `return;` means `return null;`; any `return expr;` returns `expr`;
+- a snippet with neither such a result expression nor a `return expr;` returns nothing: its entry method is `void`
+  (`returnType` = `System.Void`); otherwise `return;` means `return null;` and any `return expr;` returns `expr`;
 - `await` anywhere in the statements (outside lambdas and local functions) makes the entry method asynchronous.
 
 The generated names are an implementation detail (`__CodeExecSnippet.__Run`); the agent never needs them.
@@ -82,3 +84,8 @@ identical requests reuse the already-loaded assembly (cache).
 
 ## 5. Value text in golden tests
 Golden fixtures compare `value` as text: C# `ToString()` (`True`, `42`), Python `str()` (`True`, `42`).
+
+## Changelog
+
+- **v0.2** — `returnType` (C#). A snippet that returns nothing compiles to a `void` (or `async Task`) entry method.
+- **v0.1** — first contract.

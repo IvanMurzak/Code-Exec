@@ -6,7 +6,24 @@
       "code": "1 + 2",
       "expect": {
         "success": true,
-        "value": "3"
+        "value": "3",
+        "returnType": "System.Int32"
+      }
+    },
+    {
+      "name": "result-type-generic",
+      "code": "new List<int> { 1, 2 }",
+      "expect": {
+        "success": true,
+        "returnType": "System.Collections.Generic.List<System.Int32>"
+      }
+    },
+    {
+      "name": "result-type-tuple-is-object",
+      "code": "(1, \"a\")",
+      "expect": {
+        "success": true,
+        "returnType": "System.Object"
       }
     },
     {
@@ -98,7 +115,8 @@
       "code": "var list = new List<int>();\nlist.Add(1)",
       "expect": {
         "success": true,
-        "value": null
+        "value": null,
+        "returnType": "System.Void"
       }
     },
     {
@@ -122,7 +140,35 @@
       "code": "if (DateTime.Now.Year > 2000) return;\nreturn 1;",
       "expect": {
         "success": true,
-        "value": null
+        "value": null,
+        "returnType": "System.Object"
+      }
+    },
+    {
+      "name": "tail-with-bare-return",
+      "code": "if (DateTime.Now.Year < 2000) return;\n1 + 2",
+      "expect": {
+        "success": true,
+        "value": "3",
+        "returnType": "System.Object"
+      }
+    },
+    {
+      "name": "void-with-bare-return",
+      "code": "if (DateTime.Now.Year > 2000) return;\nConsole.Write(\"\");",
+      "expect": {
+        "success": true,
+        "value": null,
+        "returnType": "System.Void"
+      }
+    },
+    {
+      "name": "async-void",
+      "code": "await Task.Delay(1);\nConsole.Write(\"\");",
+      "expect": {
+        "success": true,
+        "value": null,
+        "returnType": "System.Void"
       }
     },
     {
@@ -130,7 +176,8 @@
       "code": "Console.Write(\"\")",
       "expect": {
         "success": true,
-        "value": null
+        "value": null,
+        "returnType": "System.Void"
       }
     },
     {
@@ -138,7 +185,8 @@
       "code": "var unused = 1;",
       "expect": {
         "success": true,
-        "value": null
+        "value": null,
+        "returnType": "System.Void"
       }
     },
     {
@@ -162,7 +210,8 @@
       "code": "var v = await System.Threading.Tasks.Task.FromResult(5);\nv + 1",
       "expect": {
         "success": true,
-        "value": "6"
+        "value": "6",
+        "returnType": "System.Int32"
       }
     },
     {
@@ -286,6 +335,19 @@
       }
     },
     {
+      "name": "full-source-task-result",
+      "code": "public static class Entry { public static async System.Threading.Tasks.Task<int> Run() { await System.Threading.Tasks.Task.Yield(); return 9; } }",
+      "entry": {
+        "type": "Entry",
+        "method": "Run"
+      },
+      "expect": {
+        "success": true,
+        "value": "9",
+        "returnType": "System.Int32"
+      }
+    },
+    {
       "name": "full-source-namespaced",
       "code": "namespace N { public static class Entry { public static int Run() => 8; } }",
       "entry": {
@@ -294,7 +356,8 @@
       },
       "expect": {
         "success": true,
-        "value": "8"
+        "value": "8",
+        "returnType": "System.Int32"
       }
     },
     {

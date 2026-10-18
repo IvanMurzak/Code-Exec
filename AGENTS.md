@@ -10,11 +10,13 @@ Unity, Godot, Unreal, MCP, ReflectorNet or any hosted service — hosts plug in 
 - `dotnet/CodeExec.Roslyn/src/` — the Roslyn adapter, shipped as **source** (package `com.IvanMurzak.CodeExec.Roslyn`).
 - `dotnet/CodeExec.Tests/` — xUnit; compiles the adapter source like a consumer, against `-p:RoslynVersion=…`.
 - `dotnet/samples/PackageConsumer/` — consumes the packed packages with strict settings (nullable off, C# 9).
+- `dotnet/samples/SourceConsumer/` — compiles Core + adapter as source (C# 9, netstandard2.0): how Unity-MCP vendors them.
 - `python/code_exec/` — the Python runtime (stdlib only); `python/tests/` — golden + behaviour tests.
 
 ## Rules
 1. **Semantics change = contract change.** Edit `spec/contract.md`, then the golden fixtures, then BOTH runtimes.
-2. Core stays dependency-free. Never add a `PackageReference` to `dotnet/CodeExec`.
+2. Core stays dependency-free. Never add a `PackageReference` to `dotnet/CodeExec`. Hosts may vendor Core as source
+   (Unity-MCP does), so Core is C# 9 compatible too and every file starts with `#nullable enable`.
 3. The adapter source must compile with **C# 9 and Roslyn 3.8** (it is authored against them), with no warnings under
    `TreatWarningsAsErrors`, nullable on or off. Types stay `internal` (several assemblies may carry a copy).
    Every new Roslyn API needs a check that it exists in 3.8.

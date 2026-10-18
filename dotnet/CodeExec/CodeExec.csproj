@@ -7,6 +7,8 @@
   -->
   <PropertyGroup>
     <TargetFrameworks>netstandard2.0;net8.0</TargetFrameworks>
+    <!-- Hosts may vendor Core as source (Unity-MCP: C# 9), so both targets compile as C# 9. -->
+    <LangVersion>9.0</LangVersion>
     <AssemblyName>com.IvanMurzak.CodeExec</AssemblyName>
     <RootNamespace>com.IvanMurzak.CodeExec</RootNamespace>
     <IsPackable>true</IsPackable>

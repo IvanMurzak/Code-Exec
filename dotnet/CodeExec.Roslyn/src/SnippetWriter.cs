@@ -23,16 +23,20 @@ namespace com.IvanMurzak.CodeExec.Roslyn
 
         internal sealed class Output
         {
-            public Output(string source, TextSpan? returnedExpression)
+            public Output(string source, TextSpan? returnedExpression, bool hasOtherReturns)
             {
                 Source = source;
                 ReturnedExpression = returnedExpression;
+                HasOtherReturns = hasOtherReturns;
             }
 
             public string Source { get; }
 
             /// <summary>Where the expression turned into the result sits in <see cref="Source"/>, if one was.</summary>
             public TextSpan? ReturnedExpression { get; }
+
+            /// <summary>The snippet also has `return` statements (`return;` = `return null;`), so the result type is not just the tail's.</summary>
+            public bool HasOtherReturns { get; }
         }
 
         public static Output Write(string code, IReadOnlyList<string> usings, IReadOnlyList<ParameterDeclaration> parameters, bool returnLastExpression)
@@ -71,8 +75,21 @@ namespace com.IvanMurzak.CodeExec.Roslyn
             foreach (var t in topLevel)
                 Emit(sb, t.GetLocation(), t.ToString());
 
-            // `await` expressions, `await foreach` and `await using` all carry the await keyword.
-            var isAsync = body.Any(s => s.Node.DescendantTokens(n => !IsNestedFunction(n)).Any(t => t.IsKind(SyntaxKind.AwaitKeyword)));
+            // One pass over the snippet's own scope (nested functions have their own `return` / `await`): `await`
+            // expressions, `await foreach` and `await using` all carry the await keyword.
+            bool isAsync = false, hasValueReturns = false, hasReturns = false;
+            foreach (var (node, _) in body)
+            {
+                foreach (var item in node.DescendantNodesAndTokensAndSelf(n => !IsNestedFunction(n)))
+                {
+                    isAsync |= item.IsKind(SyntaxKind.AwaitKeyword);
+                    if (item.AsNode() is ReturnStatementSyntax ret)
+                    {
+                        hasReturns = true;
+                        hasValueReturns |= ret.Expression != null;
+                    }
+                }
+            }
             sb.Append("#line hidden\npublic static class ").Append(EntryType).Append("\n{\n");
             foreach (var m in members)
             {
@@ -90,23 +107,29 @@ namespace com.IvanMurzak.CodeExec.Roslyn
                 Emit(sb, rest.GetLocation(), "static");
                 Emit(sb, rest.GetLocation(), text.Substring(split));
             }
+            // The result candidate is the last statement, ignoring trailing local function declarations. A snippet with
+            // neither a result expression nor a `return value;` compiles to a void entry (returnType System.Void).
+            var last = body.FindLastIndex(s => !(s.Node is MethodDeclarationSyntax));
+            var lastIsResult = returnLastExpression && last >= 0 && body[last].Node is ExpressionStatementSyntax tail
+                && (tail.SemicolonToken.IsMissing || !IsStatementExpression(tail.Expression));
+            var returnsValue = lastIsResult || hasValueReturns;
             sb.Append("#line hidden\npublic static ")
-                .Append(isAsync ? "async global::System.Threading.Tasks.Task<object> " : "object ")
+                .Append(isAsync
+                    ? "async global::System.Threading.Tasks.Task" + (returnsValue ? "<object> " : " ")
+                    : returnsValue ? "object " : "void ")
                 .Append(EntryMethod).Append('(')
                 .Append(string.Join(", ", parameters.Select(p => p.TypeName + " " + p.Name)))
                 .Append(")\n{\n");
 
-            // The result candidate is the last statement, ignoring trailing local function declarations.
-            var last = body.FindLastIndex(s => !(s.Node is MethodDeclarationSyntax));
             TextSpan? returned = null;
             for (var i = 0; i < body.Count; i++)
             {
                 var (node, text) = body[i];
-                if (node is StatementSyntax statement)
+                if (returnsValue && node is StatementSyntax statement)
                     text = new BareReturnRewriter().Visit(statement)!.ToString();
                 if (node is ExpressionStatementSyntax expression)
                 {
-                    if (returnLastExpression && i == last && (expression.SemicolonToken.IsMissing || !IsStatementExpression(expression.Expression)))
+                    if (lastIsResult && i == last)
                     {
                         // `return` on a line of its own (same agent line): the expression keeps the agent's columns.
                         var at = expression.Expression.GetLocation();
@@ -120,8 +143,12 @@ namespace com.IvanMurzak.CodeExec.Roslyn
                 }
                 Emit(sb, node.GetLocation(), text);
             }
-            sb.Append("#line hidden\nreturn null;\n}\n}\n");
-            return new Output(sb.ToString(), returned);
+            sb.Append("#line hidden\n");
+            if (returnsValue)
+                sb.Append("return null;\n");
+            sb.Append("}\n}\n");
+            // A bare `return;` beside a result tail is a `return null;`: the tail is not the only result either.
+            return new Output(sb.ToString(), returned, hasReturns);
         }
 
         /// <summary>

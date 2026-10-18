@@ -1,3 +1,4 @@
+#nullable enable
 using System;
 using System.Collections.Generic;
 
@@ -55,6 +56,9 @@ namespace com.IvanMurzak.CodeExec
 
         public string EntryType { get; set; } = "";
         public string EntryMethod { get; set; } = "";
+
+        /// <summary>Static type of a snippet's result expression (<c>System.Int32</c>), when the compiler knows it; else null.</summary>
+        public string? ResultType { get; set; }
         public IReadOnlyList<CodeDiagnostic> Diagnostics { get; set; } = Array.Empty<CodeDiagnostic>();
 
         /// <summary>Simple names the compiler could not resolve (CS0246 / CS0103): the input for auto-import.</summary>

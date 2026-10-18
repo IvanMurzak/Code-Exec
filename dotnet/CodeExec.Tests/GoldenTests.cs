@@ -49,6 +49,8 @@ namespace CodeExecTests
                 else
                     Assert.True(value.GetString() == result.Value?.ToString(), describe);
             }
+            if (expect.TryGetProperty("returnType", out var returnType))
+                Assert.True(returnType.GetString() == result.ReturnType, describe + " returnType=" + result.ReturnType);
             if (expect.TryGetProperty("errorKind", out var kind))
                 Assert.True(kind.GetString() == result.ErrorKind.ToString(), describe);
             if (expect.TryGetProperty("errorContains", out var contains))
