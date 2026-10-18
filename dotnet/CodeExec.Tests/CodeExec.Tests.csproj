@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Tests compile the adapter SOURCE exactly like a consumer does, against $(RoslynVersion) (CI matrix: 3.8.0 … latest).
+    net48 (Windows only, -p:IncludeNetFx=true) exercises the netstandard2.0 build of Core with the non-collectible host,
+    the same path Unity (Mono) takes.
+  -->
+  <PropertyGroup>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <TargetFrameworks Condition="'$(IncludeNetFx)' == 'true'">net48;$(TargetFrameworks)</TargetFrameworks>
+    <RoslynVersion Condition="'$(RoslynVersion)' == ''">4.8.0</RoslynVersion>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <!-- Old Roslyn versions carry advisories that do not matter for a test host. -->
+    <NoWarn>$(NoWarn);NU1902;NU1903;NU1608</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../CodeExec.Roslyn/src/**/*.cs" Link="Adapter/%(RecursiveDir)%(Filename)%(Extension)" />
+    <ProjectReference Include="../CodeExec/CodeExec.csproj" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="$(RoslynVersion)" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="System.Text.Json" Version="8.0.5" Condition="'$(TargetFramework)' == 'net48'" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" PrivateAssets="all" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="../../fixtures/**/*" Link="fixtures/%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

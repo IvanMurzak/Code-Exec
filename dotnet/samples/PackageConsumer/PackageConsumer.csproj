@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Consumes the PACKED packages (scripts/pack.sh output) with deliberately unfriendly settings — nullable off, C# 9, no implicit usings,
+    warnings as errors — to prove the source-only adapter drops into any project.
+    Restores into a private folder so a re-pack with the same version is never served from the global cache.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <LangVersion>9.0</LangVersion>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <CodeExecVersion Condition="'$(CodeExecVersion)' == ''">0.1.0</CodeExecVersion>
+    <RoslynVersion Condition="'$(RoslynVersion)' == ''">4.8.0</RoslynVersion>
+    <RestorePackagesPath>$(MSBuildThisFileDirectory)obj/packages</RestorePackagesPath>
+    <RestoreAdditionalProjectSources>$(MSBuildThisFileDirectory)../../../packages</RestoreAdditionalProjectSources>
+    <NoWarn>$(NoWarn);NU1902;NU1903</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="com.IvanMurzak.CodeExec" Version="$(CodeExecVersion)" />
+    <PackageReference Include="com.IvanMurzak.CodeExec.Roslyn" Version="$(CodeExecVersion)" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="$(RoslynVersion)" />
+  </ItemGroup>
+</Project>

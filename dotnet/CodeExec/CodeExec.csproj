@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Core of Code-Exec. Deliberately has NO package dependencies — Roslyn included. The compiler is plugged in through
+    ICSharpCompiler, implemented by the source-only package com.IvanMurzak.CodeExec.Roslyn, which compiles inside the
+    consumer against the consumer's own Microsoft.CodeAnalysis.CSharp.
+    netstandard2.0 serves Unity (Mono) and .NET Framework; net8.0 adds the collectible AssemblyLoadContext host.
+  -->
+  <PropertyGroup>
+    <TargetFrameworks>netstandard2.0;net8.0</TargetFrameworks>
+    <AssemblyName>com.IvanMurzak.CodeExec</AssemblyName>
+    <RootNamespace>com.IvanMurzak.CodeExec</RootNamespace>
+    <IsPackable>true</IsPackable>
+    <PackageId>com.IvanMurzak.CodeExec</PackageId>
+    <Title>Code-Exec</Title>
+    <Description>Run short C# snippets inside a live host process (game engines, editors, any .NET app). Roslyn-version-agnostic: add com.IvanMurzak.CodeExec.Roslyn and your own Microsoft.CodeAnalysis.CSharp.</Description>
+    <PackageTags>csharp;roslyn;scripting;eval;repl;unity;godot;game-dev;ai;mcp</PackageTags>
+    <PackageReadmeFile>PACKAGE.md</PackageReadmeFile>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <None Include="../../LICENSE.md" Pack="true" PackagePath="" />
+    <None Include="../PACKAGE.md" Pack="true" PackagePath="" />
+  </ItemGroup>
+</Project>
