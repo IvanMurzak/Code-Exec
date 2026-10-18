@@ -93,8 +93,9 @@ namespace CodeExecTests
             Assert.Equal("42", runner.Run(prepared.WithValues(new object?[] { 21 })).Value);
             Assert.Equal("10", runner.Run(prepared.WithValues(new object?[] { 5 })).Value);
             Assert.Equal(ErrorKind.InvalidRequest, runner.Run(prepared.WithValues(new object?[] { 1, 2 })).ErrorKind);
-            Assert.Equal(ErrorKind.InvalidRequest, runner.Run(prepared.WithValues(new object?[] { "21" })).ErrorKind);
-            Assert.Equal(ErrorKind.InvalidRequest, runner.Run(prepared.WithValues(new object?[] { null })).ErrorKind);
+            // Same conversion as Execute: a value that does not fit is a Runtime error, null becomes default(int).
+            Assert.Equal(ErrorKind.Runtime, runner.Run(prepared.WithValues(new object?[] { "21" })).ErrorKind);
+            Assert.Equal("0", runner.Run(prepared.WithValues(new object?[] { null })).Value);
         }
 
         [Fact]
@@ -108,6 +109,21 @@ namespace CodeExecTests
                 Parameters = new[] { new SnippetParameter("v", typeof(string), "x") },
             });
             Assert.Equal("string", result.Value);
+        }
+
+        [Theory]
+        [InlineData("public static string Run(object a, string b) => \"1\"; public static string Run(string a, object b) => \"2\";")]
+        [InlineData("public static string Run(int a, int b) => \"1\"; public static string Run(long a, bool b) => \"2\";")]
+        public void OverloadsThatAreAmbiguousOrDoNotFitAreNotGuessed(string members)
+        {
+            var result = Fixtures.Runner().Execute(new ExecuteRequest
+            {
+                Code = "public static class Entry { " + members + " }",
+                EntryType = "Entry",
+                EntryMethod = "Run",
+                Parameters = new[] { new SnippetParameter("a", typeof(string), "x"), new SnippetParameter("b", typeof(string), "y") },
+            });
+            Assert.Equal(ErrorKind.EntryPointNotFound, result.ErrorKind);
         }
 
         [Fact]

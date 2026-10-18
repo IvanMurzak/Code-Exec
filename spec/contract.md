@@ -54,7 +54,9 @@ The generated names are an implementation detail (`__CodeExecSnippet.__Run`); th
 
 ### 3.2. Full-source mode
 With `entry`, nothing is rewritten: the code is compiled as a regular file and the named static method is invoked
-(namespace-qualified type names allowed). Host defaults are not added.
+(namespace-qualified type names allowed). Host defaults are not added. Among overloads, the most specific one for the
+parameters' types is invoked; with none fitting, the only method of that name and parameter count. Anything else
+(ambiguous, several that do not fit) is `EntryPointNotFound`.
 
 ### 3.3. Auto-import
 When compilation fails with unknown names (`CS0246`, `CS0103`), the runtime looks the simple name up among public

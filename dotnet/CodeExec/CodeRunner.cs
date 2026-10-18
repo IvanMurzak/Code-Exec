@@ -51,9 +51,11 @@ namespace com.IvanMurzak.CodeExec
     /// <summary>The compiled form of a request. Produced by <see cref="CodeRunner.Prepare"/> (any thread).</summary>
     public sealed class PreparedSnippet
     {
-        internal PreparedSnippet(ExecuteRequest request, ExecuteResult? failure, CodeRunner.CacheEntry? entry, bool cacheHit, long compileMs)
+        internal PreparedSnippet(ExecuteRequest request, ExecuteResult? failure, CodeRunner.CacheEntry? entry, bool cacheHit, long compileMs,
+            IReadOnlyList<SnippetParameter>? parameters = null)
         {
             Request = request;
+            Parameters = parameters ?? request.Parameters;
             Failure = failure;
             Entry = entry;
             CacheHit = cacheHit;
@@ -61,6 +63,9 @@ namespace com.IvanMurzak.CodeExec
         }
 
         internal ExecuteRequest Request { get; }
+
+        /// <summary>The arguments the snippet is invoked with: the request's, or those bound by <see cref="WithValues"/>.</summary>
+        internal IReadOnlyList<SnippetParameter> Parameters { get; }
         internal ExecuteResult? Failure { get; }
         internal CodeRunner.CacheEntry? Entry { get; }
         public bool Succeeded => Failure == null;
@@ -70,28 +75,27 @@ namespace com.IvanMurzak.CodeExec
         /// <summary>
         /// The same compiled snippet with the parameter values supplied now (same order as the request's parameters): a host
         /// compiles off its main thread with the parameter TYPES and binds values (e.g. live engine objects) on the main
-        /// thread. A wrong count or a value that does not fit its declared type yields an InvalidRequest snippet.
+        /// thread. A wrong count yields an InvalidRequest snippet; values convert as in Execute.
         /// </summary>
         public PreparedSnippet WithValues(IReadOnlyList<object?> values)
         {
+            if (values == null)
+                throw new ArgumentNullException(nameof(values));
             if (Failure != null)
                 return this;
-            var declared = Request.Parameters;
-            string? error = null;
+            var declared = Parameters;
             if (values.Count != declared.Count)
-                error = $"{values.Count} value(s) given for {declared.Count} parameter(s).";
-            for (var i = 0; error == null && i < declared.Count; i++)
             {
-                var type = declared[i].Type;
-                var fits = values[i] == null ? !type.IsValueType || Nullable.GetUnderlyingType(type) != null : type.IsInstanceOfType(values[i]);
-                if (!fits)
-                    error = $"Parameter '{declared[i].Name}': a {values[i]?.GetType().FullName ?? "null"} value does not fit {type.FullName}.";
+                // Only the count is checked here; values convert exactly as in Execute (reflection Invoke: null -> default,
+                // primitive widening), and a value that does not fit is a Runtime error on both paths.
+                var failure = ExecuteResult.Fail(ErrorKind.InvalidRequest, $"{values.Count} value(s) given for {declared.Count} parameter(s).");
+                failure.CompileMs = CompileMs;
+                failure.CacheHit = CacheHit;
+                return new PreparedSnippet(Request, failure, null, CacheHit, CompileMs);
             }
-            if (error != null)
-                return new PreparedSnippet(Request, ExecuteResult.Fail(ErrorKind.InvalidRequest, error), null, CacheHit, CompileMs);
 
-            var bound = Request.With(declared.Select((p, i) => new SnippetParameter(p.Name, p.Type, values[i])).ToList());
-            return new PreparedSnippet(bound, null, Entry, CacheHit, CompileMs);
+            var bound = declared.Select((p, i) => new SnippetParameter(p.Name, p.Type, values[i])).ToList();
+            return new PreparedSnippet(Request, null, Entry, CacheHit, CompileMs, bound);
         }
     }
 
@@ -279,7 +283,7 @@ namespace com.IvanMurzak.CodeExec
             var run = new Execution(this, prepared);
             try
             {
-                var parameters = prepared.Request.Parameters;
+                var parameters = prepared.Parameters;
                 run.Loaded = Load(entry);
 
                 var type = run.Loaded.Assembly.GetType(entry.EntryType, throwOnError: false);
@@ -313,13 +317,18 @@ namespace com.IvanMurzak.CodeExec
         {
             if (_host.SupportsUnload)
                 return _host.Load(entry.Image!, entry.Symbols, entry.AssemblyName);
+            byte[] image;
+            byte[]? symbols;
             lock (_cacheLock)
             {
                 if (_loaded.TryGetValue(entry.Key, out var published))
                     return published.Loaded!;
+                image = entry.Image!; // non-null until published, and it is not published yet
+                symbols = entry.Symbols;
             }
 
-            var loaded = _host.Load(entry.Image!, entry.Symbols, entry.AssemblyName);
+            var loaded = _host.Load(image, symbols, entry.AssemblyName);
+            Interlocked.Increment(ref Stats.loadedAssemblies); // permanent, even when a concurrent run wins below
             lock (_cacheLock)
             {
                 if (_loaded.TryGetValue(entry.Key, out var published))
@@ -333,7 +342,6 @@ namespace com.IvanMurzak.CodeExec
                     _lru.Remove(node);
                     _cache.Remove(entry.Key);
                 }
-                Interlocked.Increment(ref Stats.loadedAssemblies);
                 return loaded;
             }
         }

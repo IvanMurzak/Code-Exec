@@ -54,18 +54,6 @@ namespace com.IvanMurzak.CodeExec
 
         /// <summary>Retry with a namespace when an unknown simple name resolves to exactly one (spec §3.3).</summary>
         public bool AutoImport { get; set; } = true;
-
-        internal ExecuteRequest With(IReadOnlyList<SnippetParameter> parameters) => new ExecuteRequest
-        {
-            Code = Code,
-            Usings = Usings,
-            Include = Include,
-            EntryType = EntryType,
-            EntryMethod = EntryMethod,
-            Parameters = parameters,
-            TimeoutMs = TimeoutMs,
-            AutoImport = AutoImport,
-        };
     }
 
     public sealed class LogEntry
