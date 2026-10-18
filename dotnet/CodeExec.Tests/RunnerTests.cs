@@ -85,6 +85,60 @@ namespace CodeExecTests
         }
 
         [Fact]
+        public void ValuesCanBeSuppliedAtRunTime()
+        {
+            // A host compiles off its main thread with parameter TYPES only and binds the values when it runs.
+            var runner = Fixtures.Runner();
+            var prepared = runner.Prepare(new ExecuteRequest { Code = "a * 2", Parameters = new[] { new SnippetParameter("a", typeof(int), null) } });
+            Assert.Equal("42", runner.Run(prepared.WithValues(new object?[] { 21 })).Value);
+            Assert.Equal("10", runner.Run(prepared.WithValues(new object?[] { 5 })).Value);
+            Assert.Equal(ErrorKind.InvalidRequest, runner.Run(prepared.WithValues(new object?[] { 1, 2 })).ErrorKind);
+            // Same conversion as Execute: a value that does not fit is a Runtime error, null becomes default(int).
+            Assert.Equal(ErrorKind.Runtime, runner.Run(prepared.WithValues(new object?[] { "21" })).ErrorKind);
+            Assert.Equal("0", runner.Run(prepared.WithValues(new object?[] { null })).Value);
+        }
+
+        [Fact]
+        public void MostSpecificOverloadIsChosen()
+        {
+            var result = Fixtures.Runner().Execute(new ExecuteRequest
+            {
+                Code = "public static class Entry { public static string Run(object v) => \"object\"; public static string Run(string v) => \"string\"; public static string Run(int v) => \"int\"; }",
+                EntryType = "Entry",
+                EntryMethod = "Run",
+                Parameters = new[] { new SnippetParameter("v", typeof(string), "x") },
+            });
+            Assert.Equal("string", result.Value);
+        }
+
+        [Theory]
+        [InlineData("public static string Run(object a, string b) => \"1\"; public static string Run(string a, object b) => \"2\";")]
+        [InlineData("public static string Run(int a, int b) => \"1\"; public static string Run(long a, bool b) => \"2\";")]
+        public void OverloadsThatAreAmbiguousOrDoNotFitAreNotGuessed(string members)
+        {
+            var result = Fixtures.Runner().Execute(new ExecuteRequest
+            {
+                Code = "public static class Entry { " + members + " }",
+                EntryType = "Entry",
+                EntryMethod = "Run",
+                Parameters = new[] { new SnippetParameter("a", typeof(string), "x"), new SnippetParameter("b", typeof(string), "y") },
+            });
+            Assert.Equal(ErrorKind.EntryPointNotFound, result.ErrorKind);
+        }
+
+        [Fact]
+        public void NonCollectibleEntryEvictedBeforeItsFirstRunIsPinned()
+        {
+            var runner = Fixtures.Runner(configure: o => { o.Host = new DefaultAssemblyHost(); o.CacheCapacity = 1; });
+            var first = runner.Prepare(new ExecuteRequest { Code = "100 + 1" });
+            runner.Prepare(new ExecuteRequest { Code = "100 + 2" }); // evicts the first entry before it ever ran
+            Assert.Equal("101", runner.Run(first).Value);
+            var again = runner.Prepare(new ExecuteRequest { Code = "100 + 1" });
+            Assert.True(again.CacheHit); // reused, not compiled and loaded a second time
+            Assert.Equal(1, runner.Stats.LoadedAssemblies);
+        }
+
+        [Fact]
         public void FullSourceModeReceivesParameters()
         {
             var result = Fixtures.Runner().Execute(new ExecuteRequest
