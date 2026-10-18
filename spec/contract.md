@@ -23,6 +23,7 @@ One request/response shape for every runtime (C# and Python) and every host (Uni
 |---|---|---|
 | `success` | bool | |
 | `value` | any | The result, converted by the host **before** the snippet's code is unloaded. `null` when there is none. |
+| `returnType` | string | C# only. Declared result type of the entry point (`Task<T>` → `T`): `System.Void` when the snippet returns nothing, `System.Object` when a snippet returns a value, the method's type in full-source mode. |
 | `logs` | `{ level, message }[]` | Output written while the snippet ran (`Console`, `print`, engine log hooks). |
 | `errorKind` | enum | `None`, `InvalidRequest`, `Compile`, `EntryPointNotFound`, `Runtime`, `Timeout`, `NotAvailable`. |
 | `error` | string | Human-readable error; for `Runtime`: `ExceptionType: message` plus the snippet's stack frames. |
@@ -45,7 +46,8 @@ The snippet is parsed as C# **script** code and rewritten into one ordinary comp
 - the **last statement** (trailing local functions aside), when it is an expression without `;`, or an expression that
   is not a valid statement (`x * 2;`), is returned; if that expression is `void`, it runs as a plain statement and the
   result is `null`;
-- `return;` means `return null;`; any `return expr;` returns `expr`;
+- a snippet with neither such a result expression nor a `return expr;` returns nothing: its entry method is `void`
+  (`returnType` = `System.Void`); otherwise `return;` means `return null;` and any `return expr;` returns `expr`;
 - `await` anywhere in the statements (outside lambdas and local functions) makes the entry method asynchronous.
 
 The generated names are an implementation detail (`__CodeExecSnippet.__Run`); the agent never needs them.

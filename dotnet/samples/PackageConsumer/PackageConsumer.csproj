@@ -11,7 +11,7 @@
     <LangVersion>9.0</LangVersion>
     <ImplicitUsings>disable</ImplicitUsings>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
-    <CodeExecVersion Condition="'$(CodeExecVersion)' == ''">0.1.0</CodeExecVersion>
+    <CodeExecVersion Condition="'$(CodeExecVersion)' == ''">0.2.0</CodeExecVersion>
     <RoslynVersion Condition="'$(RoslynVersion)' == ''">4.8.0</RoslynVersion>
     <RestorePackagesPath>$(MSBuildThisFileDirectory)obj/packages</RestorePackagesPath>
     <RestoreAdditionalProjectSources>$(MSBuildThisFileDirectory)../../../packages</RestoreAdditionalProjectSources>

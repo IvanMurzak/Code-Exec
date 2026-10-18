@@ -90,23 +90,30 @@ namespace com.IvanMurzak.CodeExec.Roslyn
                 Emit(sb, rest.GetLocation(), "static");
                 Emit(sb, rest.GetLocation(), text.Substring(split));
             }
+            // The result candidate is the last statement, ignoring trailing local function declarations. A snippet with
+            // neither a result expression nor a `return value;` compiles to a void entry (returnType System.Void).
+            var last = body.FindLastIndex(s => !(s.Node is MethodDeclarationSyntax));
+            var lastIsResult = returnLastExpression && last >= 0 && body[last].Node is ExpressionStatementSyntax tail
+                && (tail.SemicolonToken.IsMissing || !IsStatementExpression(tail.Expression));
+            var returnsValue = lastIsResult || body.Any(s => s.Node is StatementSyntax
+                && s.Node.DescendantNodesAndSelf(n => !IsNestedFunction(n)).OfType<ReturnStatementSyntax>().Any(r => r.Expression != null));
             sb.Append("#line hidden\npublic static ")
-                .Append(isAsync ? "async global::System.Threading.Tasks.Task<object> " : "object ")
+                .Append(isAsync
+                    ? (returnsValue ? "async global::System.Threading.Tasks.Task<object> " : "async global::System.Threading.Tasks.Task ")
+                    : (returnsValue ? "object " : "void "))
                 .Append(EntryMethod).Append('(')
                 .Append(string.Join(", ", parameters.Select(p => p.TypeName + " " + p.Name)))
                 .Append(")\n{\n");
 
-            // The result candidate is the last statement, ignoring trailing local function declarations.
-            var last = body.FindLastIndex(s => !(s.Node is MethodDeclarationSyntax));
             TextSpan? returned = null;
             for (var i = 0; i < body.Count; i++)
             {
                 var (node, text) = body[i];
-                if (node is StatementSyntax statement)
+                if (returnsValue && node is StatementSyntax statement)
                     text = new BareReturnRewriter().Visit(statement)!.ToString();
                 if (node is ExpressionStatementSyntax expression)
                 {
-                    if (returnLastExpression && i == last && (expression.SemicolonToken.IsMissing || !IsStatementExpression(expression.Expression)))
+                    if (lastIsResult && i == last)
                     {
                         // `return` on a line of its own (same agent line): the expression keeps the agent's columns.
                         var at = expression.Expression.GetLocation();
@@ -120,7 +127,7 @@ namespace com.IvanMurzak.CodeExec.Roslyn
                 }
                 Emit(sb, node.GetLocation(), text);
             }
-            sb.Append("#line hidden\nreturn null;\n}\n}\n");
+            sb.Append(returnsValue ? "#line hidden\nreturn null;\n}\n}\n" : "}\n}\n");
             return new Output(sb.ToString(), returned);
         }
 

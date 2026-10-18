@@ -1,3 +1,4 @@
+#nullable enable
 using System;
 using System.Collections.Generic;
 
@@ -88,6 +89,12 @@ namespace com.IvanMurzak.CodeExec
 
         /// <summary>The result after <see cref="CodeRunnerOptions.ValueConverter"/>; never an object of the snippet's own types.</summary>
         public object? Value { get; set; }
+
+        /// <summary>
+        /// Declared result type of the entry point (<c>Task&lt;T&gt;</c> → <c>T</c>): <c>System.Void</c> when nothing is
+        /// returned, <c>System.Object</c> for a snippet that returns a value. Null when the entry point was never reached.
+        /// </summary>
+        public string? ReturnType { get; set; }
 
         public IReadOnlyList<LogEntry> Logs { get; set; } = Array.Empty<LogEntry>();
         public ErrorKind ErrorKind { get; set; }

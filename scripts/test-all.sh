@@ -9,6 +9,8 @@ for v in "${versions[@]}"; do
   echo "== .NET tests, Roslyn $v"
   dotnet test "$root/dotnet/CodeExec.Tests/CodeExec.Tests.csproj" -c Release -p:RoslynVersion="$v"
 done
+echo "== Core + adapter as source (C# 9, netstandard2.0)"
+dotnet build "$root/dotnet/samples/SourceConsumer/SourceConsumer.csproj" -c Release
 echo "== pack + package consumer"
 [ "${SKIP_PACK:-}" = "1" ] || "$root/scripts/pack.sh" "$root/packages" >/dev/null
 "$root/scripts/consume.sh" "${versions[@]}"

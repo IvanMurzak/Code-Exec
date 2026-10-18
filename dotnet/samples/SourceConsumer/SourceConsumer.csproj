@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Compiles Core AND the adapter as SOURCE the way a vendoring host does (Unity copies both into an Editor assembly):
+    netstandard2.0, C# 9, nullable off, warnings as errors, against Roslyn 4.8 (Unity-MCP's pin). Build-only check.
+  -->
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <LangVersion>9.0</LangVersion>
+    <Nullable>disable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <IsPackable>false</IsPackable>
+    <NoWarn>$(NoWarn);NU1902;NU1903</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../CodeExec/*.cs;../../CodeExec.Roslyn/src/*.cs" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.8.0" />
+  </ItemGroup>
+</Project>

@@ -1,3 +1,4 @@
+#nullable enable
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -266,6 +267,7 @@ namespace com.IvanMurzak.CodeExec
                     return run;
                 }
 
+                run.ReturnType = ResultTypeName(method.ReturnType);
                 run.BeginCapture(_options.LogCaptures);
                 run.SetResult(method.ReturnType, method.Invoke(null, prepared.Request.Parameters.Select(p => p.Value).ToArray()));
             }
@@ -276,6 +278,17 @@ namespace com.IvanMurzak.CodeExec
                 run.Fail(ErrorKind.Runtime, FormatException(e, run.Loaded?.Assembly));
             }
             return run;
+        }
+
+        /// <summary>The declared result type: <c>Task</c> / <c>ValueTask</c> → <c>System.Void</c>, <c>Task&lt;T&gt;</c> / <c>ValueTask&lt;T&gt;</c> → <c>T</c>.</summary>
+        static string ResultTypeName(Type declared)
+        {
+            var name = (declared.IsGenericType ? declared.GetGenericTypeDefinition() : declared).FullName;
+            if (name == "System.Threading.Tasks.Task" || name == "System.Threading.Tasks.ValueTask")
+                return typeof(void).FullName!;
+            if (name == "System.Threading.Tasks.Task`1" || name == "System.Threading.Tasks.ValueTask`1")
+                return declared.GetGenericArguments()[0].FullName ?? declared.GetGenericArguments()[0].Name;
+            return declared.FullName ?? declared.Name;
         }
 
         /// <summary><c>Type: message</c> plus only the stack frames of the snippet's own assembly (snippet and includes).</summary>
@@ -425,6 +438,7 @@ namespace com.IvanMurzak.CodeExec
             }
 
             public ILoadedAssembly? Loaded { get; set; }
+            public string? ReturnType { get; set; }
 
             /// <summary>The snippet's task while its result is still to come; null for synchronous results.</summary>
             public Task? Pending { get; private set; }
@@ -490,6 +504,7 @@ namespace com.IvanMurzak.CodeExec
                 {
                     Success = _errorKind == ErrorKind.None,
                     Value = value,
+                    ReturnType = ReturnType,
                     Logs = logs,
                     ErrorKind = _errorKind,
                     Error = _error,
