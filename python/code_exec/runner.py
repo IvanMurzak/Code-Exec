@@ -3,7 +3,6 @@
 import ast
 import base64
 import builtins
-import importlib
 import io
 import json
 import os
@@ -23,7 +22,7 @@ def set_value_converter(converter):
     _value_converter = converter
 
 
-def run(code, include=(), include_root=None, imports=(), namespace=None, converter=None):
+def run(code, include=(), include_root=None, imports=()):
     """Execute ``code`` and return the contract's response as a dict (never raises for snippet errors)."""
     started = time.perf_counter()
     result = _empty()
@@ -33,12 +32,12 @@ def run(code, include=(), include_root=None, imports=(), namespace=None, convert
 
     root = os.path.abspath(include_root or os.getcwd())
     try:
-        folders, files = _resolve_include(include or (), root)
+        folders, files = _resolve_include(include, root)
     except (OSError, ValueError) as error:
         return _fail(result, "InvalidRequest", str(error))
 
     try:
-        compiled_files = [(path, compile(_read(full), path, "exec")) for path, full in files]
+        file_code = [compile(_read(full), path, "exec") for path, full in files]
         tree = ast.parse(code, SNIPPET_FILE, "exec")
         last = None
         if tree.body and isinstance(tree.body[-1], ast.Expr):
@@ -60,39 +59,36 @@ def run(code, include=(), include_root=None, imports=(), namespace=None, convert
 
     executing = time.perf_counter()
     scope = {"__name__": "__code_exec__", "__builtins__": builtins}
-    if namespace:
-        scope.update(namespace)
-
-    logs = result["logs"]
-    out, err = _LogStream(logs, "info"), _LogStream(logs, "error")
+    out, err = _LogStream(result["logs"], "info"), _LogStream(result["logs"], "error")
+    prefixes = [_prefix(folder) for folder in folders]
     saved_path = list(sys.path)
     saved_bytecode = sys.dont_write_bytecode
-    _forget_modules(folders)
     try:
         sys.path[:0] = folders
         if folders:
             # Helpers are edited between runs, often within the same second and at the same size, which a cached
-            # .pyc cannot tell apart: never cache include modules, always import them from source.
+            # .pyc cannot tell apart: never write bytecode for them, and forget the folders' directory listings.
             sys.dont_write_bytecode = True
-            importlib.invalidate_caches()
+            for folder in folders:
+                sys.path_importer_cache.pop(folder, None)
         for name in imports or ():
             scope.setdefault(name.split(".")[0], __import__(name))  # like `import a.b`: binds the top package
         with redirect_stdout(out), redirect_stderr(err):
-            for _, file_code in compiled_files:
-                exec(file_code, scope)
+            for compiled in file_code:
+                exec(compiled, scope)
             exec(body, scope)
             value = eval(tail, scope) if tail is not None else None
-        result["value"] = _convert(value, converter)
+        result["value"] = _convert(value)
         result["success"] = True
     except (Exception, SystemExit) as error:  # a snippet must never take the host down
         result["errorKind"] = "Runtime"
-        result["error"] = _format_error(error, root, folders, [path for path, _ in files])
+        result["error"] = _format_error(error, root, prefixes, {path for path, _ in files})
     finally:
         out.flush()
         err.flush()
         sys.path[:] = saved_path
         sys.dont_write_bytecode = saved_bytecode
-        _forget_modules(folders)
+        _forget_modules(prefixes)
     result["executeMs"] = _ms(executing)
     return result
 
@@ -102,16 +98,15 @@ def run_json(payload):
     try:
         request = json.loads(payload)
     except ValueError as error:
-        return json.dumps(_fail(_empty(), "InvalidRequest", "request is not JSON: %s" % error))
+        return _invalid("request is not JSON: %s" % error)
     if not isinstance(request, dict):
-        return json.dumps(_fail(_empty(), "InvalidRequest", "request must be a JSON object"))
-    response = run(
+        return _invalid("request must be a JSON object")
+    return json.dumps(run(
         request.get("code", ""),
         include=request.get("include") or (),
         include_root=request.get("includeRoot"),
         imports=request.get("imports") or (),
-    )
-    return json.dumps(response)
+    ))
 
 
 def run_b64(payload_b64):
@@ -119,7 +114,7 @@ def run_b64(payload_b64):
     try:
         payload = base64.b64decode(payload_b64).decode("utf-8")
     except (ValueError, UnicodeDecodeError) as error:
-        return json.dumps(_fail(_empty(), "InvalidRequest", "request is not base64 UTF-8: %s" % error))
+        return _invalid("request is not base64 UTF-8: %s" % error)
     return run_json(payload)
 
 
@@ -137,6 +132,10 @@ def _fail(result, kind, message):
     return result
 
 
+def _invalid(message):
+    return json.dumps(_fail(_empty(), "InvalidRequest", message))
+
+
 def _ms(since):
     return int((time.perf_counter() - since) * 1000)
 
@@ -151,69 +150,69 @@ def _resolve_include(include, root):
     if isinstance(include, str):
         raise ValueError("include must be a list of paths")
     folders, files, seen = [], [], set()
-    for entry in include:
+    for entry in include or ():
         if not isinstance(entry, str) or not entry.strip():
             raise ValueError("include entry is empty")
         full = os.path.abspath(entry if os.path.isabs(entry) else os.path.join(root, entry))
+        if full in seen:
+            continue
+        seen.add(full)
         if os.path.isdir(full):
-            if full not in folders:
-                folders.append(full)
+            folders.append(full)
         elif os.path.isfile(full):
-            if full not in seen:
-                seen.add(full)
-                files.append((_relative(full, root), full))
+            files.append((_relative(full, root), full))
         else:
             raise FileNotFoundError("include not found: %s" % entry)
     return folders, files
 
 
+def _prefix(folder):
+    return os.path.normcase(os.path.join(folder, ""))
+
+
+def _under(path, prefixes):
+    path = os.path.normcase(os.path.abspath(path))
+    return any(path.startswith(prefix) for prefix in prefixes)
+
+
 def _relative(path, root):
-    relative = os.path.relpath(path, root) if _is_under(path, root) else path
+    relative = os.path.relpath(path, root) if _under(path, [_prefix(root)]) else path
     return relative.replace("\\", "/")
 
 
-def _is_under(path, folder):
-    folder = os.path.normcase(os.path.join(folder, ""))
-    return os.path.normcase(path).startswith(folder)
-
-
-def _forget_modules(folders):
+def _forget_modules(prefixes):
     """Drop modules imported from include folders, so an edited helper is re-imported on the next run."""
-    if not folders:
+    if not prefixes:
         return
     for name, module in list(sys.modules.items()):
         location = getattr(module, "__file__", None)
-        if location and any(_is_under(os.path.abspath(location), folder) for folder in folders):
+        if location and _under(location, prefixes):
             del sys.modules[name]
 
 
-def _convert(value, converter):
-    for hook in (converter, _value_converter):
-        if hook is not None:
-            converted = hook(value)
-            if converted is not NotImplemented:
-                return converted
+def _convert(value):
+    if _value_converter is not None:
+        converted = _value_converter(value)
+        if converted is not NotImplemented:
+            return converted
     if value is None or isinstance(value, str):
         return value
-    if isinstance(value, (bool, int, float)):
-        return str(value)
     if isinstance(value, (dict, list, tuple)):
         try:
             return json.dumps(value)
         except (TypeError, ValueError):
-            return str(value)
+            pass
     return str(value)
 
 
-def _format_error(error, root, folders, include_files):
+def _format_error(error, root, prefixes, include_files):
     """``Type: message`` plus only the frames the agent wrote (snippet.py, include files, include folders)."""
     frames = []
     for frame in traceback.extract_tb(error.__traceback__):
-        name = frame.filename
-        if name == SNIPPET_FILE or name in include_files:
+        if frame.filename == SNIPPET_FILE or frame.filename in include_files:
             frames.append(frame)
-        elif any(_is_under(os.path.abspath(name), folder) for folder in folders):
-            frame.filename = _relative(os.path.abspath(name), root)
+        elif _under(frame.filename, prefixes):
+            frame.filename = _relative(os.path.abspath(frame.filename), root)
             frames.append(frame)
     lines = ["%s: %s" % (type(error).__name__, error)]
     lines.extend(line.rstrip("\n") for line in traceback.format_list(frames))
@@ -233,9 +232,8 @@ class _LogStream(io.TextIOBase):
         return True
 
     def write(self, text):
-        self._buffer += text
-        while "\n" in self._buffer:
-            line, self._buffer = self._buffer.split("\n", 1)
+        *lines, self._buffer = (self._buffer + text).split("\n")
+        for line in lines:
             self._sink.append({"level": self._level, "message": line.rstrip("\r")})
         return len(text)
 

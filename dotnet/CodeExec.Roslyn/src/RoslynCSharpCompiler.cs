@@ -6,12 +6,14 @@
 // </auto-generated>
 #nullable enable
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Emit;
 
 namespace com.IvanMurzak.CodeExec.Roslyn
@@ -25,62 +27,72 @@ namespace com.IvanMurzak.CodeExec.Roslyn
         internal const string SnippetFile = "snippet.cs";
         internal const string GeneratedFile = "<generated>";
 
-        static readonly Dictionary<string, KeyValuePair<DateTime, MetadataReference>> ReferenceCache =
-            new Dictionary<string, KeyValuePair<DateTime, MetadataReference>>(StringComparer.OrdinalIgnoreCase);
+        static readonly CSharpParseOptions ParseOptions = new CSharpParseOptions(LanguageVersion.Latest, DocumentationMode.None, SourceCodeKind.Regular);
+        static readonly ConcurrentDictionary<string, (DateTime Stamp, MetadataReference Reference)> ReferenceCache =
+            new ConcurrentDictionary<string, (DateTime, MetadataReference)>(StringComparer.OrdinalIgnoreCase);
+
+        // CodeRunner passes the same list instance while no assembly loads: resolve it to references once per instance.
+        readonly object _referencesLock = new object();
+        IReadOnlyList<string>? _lastPaths;
+        List<MetadataReference> _lastReferences = new List<MetadataReference>();
 
         public string CompilerVersion => typeof(CSharpCompilation).Assembly.GetName().Version?.ToString() ?? "unknown";
 
         public CompileResult Compile(CompileRequest request)
         {
-            var parseOptions = new CSharpParseOptions(LanguageVersion.Latest, DocumentationMode.None, SourceCodeKind.Regular);
             var trees = new List<SyntaxTree>();
             string entryType, entryMethod;
             SnippetWriter.Output? snippet = null;
 
             if (request.EntryType != null)
             {
-                trees.Add(CSharpSyntaxTree.ParseText(request.Code, parseOptions, SnippetFile, Encoding.UTF8));
+                trees.Add(Parse(request.Code, SnippetFile));
                 entryType = request.EntryType;
                 entryMethod = request.EntryMethod ?? "Main";
             }
             else
             {
                 snippet = SnippetWriter.Write(request.Code, request.Usings, request.Parameters, returnLastExpression: true);
-                trees.Add(CSharpSyntaxTree.ParseText(snippet.Source, parseOptions, GeneratedFile, Encoding.UTF8));
+                trees.Add(Parse(snippet.Source, GeneratedFile));
                 entryType = SnippetWriter.EntryType;
                 entryMethod = SnippetWriter.EntryMethod;
             }
-            foreach (var include in request.Includes)
-                trees.Add(CSharpSyntaxTree.ParseText(include.Text, parseOptions, include.Path, Encoding.UTF8));
+            trees.AddRange(request.Includes.Select(include => Parse(include.Text, include.Path)));
 
-            var references = GetReferences(request.ReferencePaths);
-            var result = Emit(request.AssemblyName, trees, references);
-            if (!result.Success && snippet != null && snippet.ReturnedLastExpression && result.Diagnostics.Any(IsVoidReturn))
-            {
-                // The trailing expression was a void call: run it as a plain statement instead.
-                var plain = SnippetWriter.Write(request.Code, request.Usings, request.Parameters, returnLastExpression: false);
-                trees[0] = CSharpSyntaxTree.ParseText(plain.Source, parseOptions, GeneratedFile, Encoding.UTF8);
-                result = Emit(request.AssemblyName, trees, references);
-            }
-            result.EntryType = entryType;
-            result.EntryMethod = entryMethod;
-            return result;
-        }
-
-        static bool IsVoidReturn(CodeDiagnostic d) =>
-            (d.Id == "CS0029" || d.Id == "CS0030" || d.Id == "CS4029") && d.Message.IndexOf("'void'", StringComparison.Ordinal) >= 0;
-
-        static CompileResult Emit(string assemblyName, List<SyntaxTree> trees, List<MetadataReference> references)
-        {
             var compilation = CSharpCompilation.Create(
-                assemblyName,
+                request.AssemblyName,
                 trees,
-                references,
+                GetReferences(request.ReferencePaths),
                 new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary)
                     .WithAllowUnsafe(true)
                     .WithOptimizationLevel(OptimizationLevel.Debug)
                     .WithAssemblyIdentityComparer(DesktopAssemblyIdentityComparer.Default));
 
+            if (snippet?.ReturnedExpression is { } span && ReturnsVoid(compilation, trees[0], span))
+            {
+                // The trailing expression is a void call: run it as a plain statement, the result is null.
+                var plain = Parse(SnippetWriter.Write(request.Code, request.Usings, request.Parameters, returnLastExpression: false).Source, GeneratedFile);
+                compilation = compilation.ReplaceSyntaxTree(trees[0], plain);
+            }
+
+            var result = Emit(compilation);
+            result.EntryType = entryType;
+            result.EntryMethod = entryMethod;
+            return result;
+        }
+
+        static SyntaxTree Parse(string text, string path) => CSharpSyntaxTree.ParseText(text, ParseOptions, path, Encoding.UTF8);
+
+        static bool ReturnsVoid(CSharpCompilation compilation, SyntaxTree tree, Microsoft.CodeAnalysis.Text.TextSpan span)
+        {
+            var node = tree.GetRoot().FindNode(span, getInnermostNodeForTie: true);
+            var expression = node as ExpressionSyntax ?? node.FirstAncestorOrSelf<ExpressionSyntax>();
+            return expression != null
+                && compilation.GetSemanticModel(tree).GetTypeInfo(expression).Type?.SpecialType == SpecialType.System_Void;
+        }
+
+        static CompileResult Emit(CSharpCompilation compilation)
+        {
             using (var image = new MemoryStream())
             using (var symbols = new MemoryStream())
             {
@@ -93,19 +105,15 @@ namespace com.IvanMurzak.CodeExec.Roslyn
                     Symbols = emit.Success ? symbols.ToArray() : null,
                     Diagnostics = errors.Select(ToDiagnostic).ToList(),
                     UnresolvedNames = errors
-                        .Where(d => (d.Id == "CS0246" || d.Id == "CS0103") && d.Location.IsInSource)
-                        .Select(d => SimpleName(d.Location.SourceTree!.GetText().ToString(d.Location.SourceSpan)))
-                        .Where(n => n.Length > 0)
+                        .Where(d => (d.Id == "CS0246" || d.Id == "CS0103") && d.Location.SourceTree != null)
+                        .Select(d => d.Location.SourceTree!.GetRoot().FindNode(d.Location.SourceSpan, getInnermostNodeForTie: true))
+                        .Select(n => n as SimpleNameSyntax ?? n.DescendantNodesAndSelf().OfType<SimpleNameSyntax>().FirstOrDefault())
+                        .Where(n => n != null)
+                        .Select(n => n!.Identifier.ValueText)
                         .Distinct(StringComparer.Ordinal)
                         .ToList(),
                 };
             }
-        }
-
-        static string SimpleName(string text)
-        {
-            var lt = text.IndexOf('<');
-            return (lt >= 0 ? text.Substring(0, lt) : text).Trim();
         }
 
         static CodeDiagnostic ToDiagnostic(Diagnostic d)
@@ -123,26 +131,33 @@ namespace com.IvanMurzak.CodeExec.Roslyn
             };
         }
 
-        static List<MetadataReference> GetReferences(IReadOnlyList<string> paths)
+        List<MetadataReference> GetReferences(IReadOnlyList<string> paths)
         {
-            var list = new List<MetadataReference>(paths.Count);
-            lock (ReferenceCache)
+            lock (_referencesLock)
             {
-                foreach (var path in paths)
+                if (ReferenceEquals(paths, _lastPaths))
+                    return _lastReferences;
+            }
+
+            var list = new List<MetadataReference>(paths.Count);
+            foreach (var path in paths)
+            {
+                DateTime stamp;
+                try { stamp = File.GetLastWriteTimeUtc(path); }
+                catch (Exception) { continue; }
+                if (!ReferenceCache.TryGetValue(path, out var cached) || cached.Stamp != stamp)
                 {
-                    DateTime stamp;
-                    try { stamp = File.GetLastWriteTimeUtc(path); }
-                    catch (Exception) { continue; }
-                    if (!ReferenceCache.TryGetValue(path, out var cached) || cached.Key != stamp)
-                    {
-                        MetadataReference reference;
-                        try { reference = MetadataReference.CreateFromFile(path); }
-                        catch (Exception) { continue; } // not a .NET assembly, locked or gone: skip it
-                        cached = new KeyValuePair<DateTime, MetadataReference>(stamp, reference);
-                        ReferenceCache[path] = cached;
-                    }
-                    list.Add(cached.Value);
+                    try { cached = (stamp, MetadataReference.CreateFromFile(path)); }
+                    catch (Exception) { continue; } // not a .NET assembly, locked or gone: skip it
+                    ReferenceCache[path] = cached;
                 }
+                list.Add(cached.Reference);
+            }
+
+            lock (_referencesLock)
+            {
+                _lastPaths = paths;
+                _lastReferences = list;
             }
             return list;
         }

@@ -71,11 +71,7 @@ jobs:
       - name: Pack and check the packages' shape
         run: scripts/pack.sh packages
       - name: Consume the packages (Roslyn 3.8.0 and 5.9.0)
-        run: |
-          for v in 3.8.0 5.9.0; do
-            rm -rf dotnet/samples/PackageConsumer/obj dotnet/samples/PackageConsumer/bin
-            dotnet run --project dotnet/samples/PackageConsumer/PackageConsumer.csproj -p:RoslynVersion=$v
-          done
+        run: scripts/consume.sh 3.8.0 5.9.0
 
   python:
     name: python ${{ matrix.python }}

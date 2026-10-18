@@ -8,6 +8,7 @@ using System.Text;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Microsoft.CodeAnalysis.Text;
 
 namespace com.IvanMurzak.CodeExec.Roslyn
 {
@@ -22,14 +23,16 @@ namespace com.IvanMurzak.CodeExec.Roslyn
 
         internal sealed class Output
         {
-            public Output(string source, bool returnedLastExpression)
+            public Output(string source, TextSpan? returnedExpression)
             {
                 Source = source;
-                ReturnedLastExpression = returnedLastExpression;
+                ReturnedExpression = returnedExpression;
             }
 
             public string Source { get; }
-            public bool ReturnedLastExpression { get; }
+
+            /// <summary>Where the expression turned into the result sits in <see cref="Source"/>, if one was.</summary>
+            public TextSpan? ReturnedExpression { get; }
         }
 
         public static Output Write(string code, IReadOnlyList<string> usings, IReadOnlyList<ParameterDeclaration> parameters, bool returnLastExpression)
@@ -37,18 +40,22 @@ namespace com.IvanMurzak.CodeExec.Roslyn
             var scriptOptions = new CSharpParseOptions(LanguageVersion.Latest, DocumentationMode.None, SourceCodeKind.Script);
             var root = (CompilationUnitSyntax)CSharpSyntaxTree.ParseText(code, scriptOptions).GetRoot();
 
-            var statements = new List<KeyValuePair<int, StatementSyntax>>();
+            // Body = statements, plus members WITHOUT modifiers: `var x = 1;` (a script field) becomes a local and
+            // `int F() => x;` a local function, so both see the snippet's locals. Members with modifiers become static
+            // members of the generated class; everything else (types, namespaces) stays top-level.
+            var body = new List<(int Line, SyntaxNode Node, string Text)>();
             var members = new List<MemberDeclarationSyntax>();
             var topLevel = new List<MemberDeclarationSyntax>();
             foreach (var member in root.Members)
             {
+                var plain = member.Modifiers.Count == 0 && member.AttributeLists.Count == 0;
                 if (member is GlobalStatementSyntax global)
-                    statements.Add(new KeyValuePair<int, StatementSyntax>(LineOf(member), global.Statement));
-                else if (member is FieldDeclarationSyntax field && field.Modifiers.Count == 0 && field.AttributeLists.Count == 0)
-                    // In script syntax a top-level `var x = 1;` is a field; without modifiers it is really a local.
-                    statements.Add(new KeyValuePair<int, StatementSyntax>(LineOf(member),
-                        SyntaxFactory.LocalDeclarationStatement(field.Declaration).WithSemicolonToken(field.SemicolonToken)));
-                else if (member is MethodDeclarationSyntax || member is FieldDeclarationSyntax || member is PropertyDeclarationSyntax || member is EventFieldDeclarationSyntax || member is EventDeclarationSyntax)
+                    body.Add((LineOf(member), global.Statement, global.Statement.ToString()));
+                else if (plain && member is FieldDeclarationSyntax field)
+                    body.Add((LineOf(member), field, field.Declaration + ";"));
+                else if (plain && member is MethodDeclarationSyntax method)
+                    body.Add((LineOf(member), method, method.ToString()));
+                else if (member is BaseMethodDeclarationSyntax || member is BasePropertyDeclarationSyntax || member is BaseFieldDeclarationSyntax)
                     members.Add(member);
                 else
                     topLevel.Add(member);
@@ -64,11 +71,11 @@ namespace com.IvanMurzak.CodeExec.Roslyn
             foreach (var t in topLevel)
                 Emit(sb, LineOf(t), t.ToString());
 
-            var isAsync = statements.Any(s => s.Value.DescendantNodesAndSelf(n => !IsNestedFunction(n)).OfType<AwaitExpressionSyntax>().Any());
+            var isAsync = body.Any(s => s.Node.DescendantNodesAndSelf(n => !IsNestedFunction(n)).OfType<AwaitExpressionSyntax>().Any());
             sb.Append("#line hidden\npublic static class ").Append(EntryType).Append("\n{\n");
             foreach (var m in members)
             {
-                var isStatic = m.Modifiers.Any(t => t.IsKind(SyntaxKind.StaticKeyword) || t.IsKind(SyntaxKind.ConstKeyword));
+                var isStatic = m.Modifiers.Any(SyntaxKind.StaticKeyword) || m.Modifiers.Any(SyntaxKind.ConstKeyword);
                 Emit(sb, LineOf(m), (isStatic ? "" : "static ") + m.ToString());
             }
             sb.Append("#line hidden\npublic static ")
@@ -77,24 +84,26 @@ namespace com.IvanMurzak.CodeExec.Roslyn
                 .Append(string.Join(", ", parameters.Select(p => p.TypeName + " " + p.Name)))
                 .Append(")\n{\n");
 
-            var returned = false;
-            for (var i = 0; i < statements.Count; i++)
+            // The result candidate is the last statement, ignoring trailing local function declarations.
+            var last = body.FindLastIndex(s => !(s.Node is MethodDeclarationSyntax));
+            TextSpan? returned = null;
+            for (var i = 0; i < body.Count; i++)
             {
-                var statement = statements[i].Value;
-                var text = new BareReturnRewriter().Visit(statement)!.ToString();
-                if (statement is ExpressionStatementSyntax expression)
+                var (line, node, text) = body[i];
+                if (node is StatementSyntax statement)
+                    text = new BareReturnRewriter().Visit(statement)!.ToString();
+                if (node is ExpressionStatementSyntax expression)
                 {
-                    if (returnLastExpression && i == statements.Count - 1 && (expression.SemicolonToken.IsMissing || !IsStatementExpression(expression.Expression)))
+                    if (returnLastExpression && i == last && (expression.SemicolonToken.IsMissing || !IsStatementExpression(expression.Expression)))
                     {
-                        text = "return " + expression.Expression + ";";
-                        returned = true;
+                        var start = Emit(sb, line, "return " + expression.Expression + ";") + "return ".Length;
+                        returned = new TextSpan(start, expression.Expression.ToString().Length);
+                        continue;
                     }
-                    else if (expression.SemicolonToken.IsMissing)
-                    {
+                    if (expression.SemicolonToken.IsMissing)
                         text += ";";
-                    }
                 }
-                Emit(sb, statements[i].Key, text);
+                Emit(sb, line, text);
             }
             sb.Append("#line hidden\nreturn null;\n}\n}\n");
             return new Output(sb.ToString(), returned);
@@ -102,33 +111,35 @@ namespace com.IvanMurzak.CodeExec.Roslyn
 
         static int LineOf(SyntaxNode node) => node.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
 
-        static void Emit(StringBuilder sb, int line, string text)
+        /// <summary>Appends <paramref name="text"/> mapped to the agent's line; returns where the text starts.</summary>
+        static int Emit(StringBuilder sb, int line, string text)
         {
-            sb.Append("#line ").Append(line).Append(" \"").Append(RoslynCSharpCompiler.SnippetFile).Append("\"\n")
-                .Append(text).Append('\n');
+            sb.Append("#line ").Append(line).Append(" \"").Append(RoslynCSharpCompiler.SnippetFile).Append("\"\n");
+            var start = sb.Length;
+            sb.Append(text).Append('\n');
+            return start;
         }
 
+        /// <summary>Code that has its own `return` and `await` scope.</summary>
         static bool IsNestedFunction(SyntaxNode node) =>
-            node is AnonymousFunctionExpressionSyntax || node is LocalFunctionStatementSyntax;
+            node is AnonymousFunctionExpressionSyntax || node is LocalFunctionStatementSyntax || node is MethodDeclarationSyntax;
 
         static bool IsStatementExpression(ExpressionSyntax e) =>
             e is InvocationExpressionSyntax || e is AssignmentExpressionSyntax || e is AwaitExpressionSyntax
-            || e is ObjectCreationExpressionSyntax
+            || e is ObjectCreationExpressionSyntax || e is ConditionalAccessExpressionSyntax
             || e.IsKind(SyntaxKind.PreIncrementExpression) || e.IsKind(SyntaxKind.PreDecrementExpression)
             || e.IsKind(SyntaxKind.PostIncrementExpression) || e.IsKind(SyntaxKind.PostDecrementExpression);
 
         /// <summary><c>return;</c> in the agent's statements becomes <c>return null;</c>; nested functions keep theirs.</summary>
         sealed class BareReturnRewriter : CSharpSyntaxRewriter
         {
+            public override SyntaxNode? Visit(SyntaxNode? node) =>
+                node != null && IsNestedFunction(node) ? node : base.Visit(node);
+
             public override SyntaxNode? VisitReturnStatement(ReturnStatementSyntax node) =>
                 node.Expression != null
                     ? node
                     : node.WithExpression(SyntaxFactory.LiteralExpression(SyntaxKind.NullLiteralExpression).WithLeadingTrivia(SyntaxFactory.Space));
-
-            public override SyntaxNode? VisitParenthesizedLambdaExpression(ParenthesizedLambdaExpressionSyntax node) => node;
-            public override SyntaxNode? VisitSimpleLambdaExpression(SimpleLambdaExpressionSyntax node) => node;
-            public override SyntaxNode? VisitAnonymousMethodExpression(AnonymousMethodExpressionSyntax node) => node;
-            public override SyntaxNode? VisitLocalFunctionStatement(LocalFunctionStatementSyntax node) => node;
         }
     }
 }

@@ -138,6 +138,24 @@ namespace CodeExecTests
         }
 
         [Fact]
+        public void VoidTailIsRecognisedUnderAnyUiCulture()
+        {
+            var culture = System.Globalization.CultureInfo.CurrentUICulture;
+            try
+            {
+                // Roslyn's messages are localized; detection must not depend on their text.
+                System.Globalization.CultureInfo.CurrentUICulture = new System.Globalization.CultureInfo("de-DE");
+                var result = Fixtures.Runner().Execute(new ExecuteRequest { Code = "var list = new List<int>();\nlist.Add(1)" });
+                Assert.True(result.Success, result.Error + string.Join(" | ", result.Diagnostics));
+                Assert.Null(result.Value);
+            }
+            finally
+            {
+                System.Globalization.CultureInfo.CurrentUICulture = culture;
+            }
+        }
+
+        [Fact]
         public void EntryMethodWithoutTypeIsInvalid()
         {
             var result = Fixtures.Runner().Execute(new ExecuteRequest { Code = "1", EntryMethod = "Run" });

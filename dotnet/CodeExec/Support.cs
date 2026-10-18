@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Text;
 
 namespace com.IvanMurzak.CodeExec
@@ -9,33 +11,46 @@ namespace com.IvanMurzak.CodeExec
     /// <summary>Simple type name → namespaces that define a public type with that name (spec §3.3).</summary>
     public static class TypeIndex
     {
+        // Per assembly, built once: listing exported types is slow on Mono. Weak keys let collectible assemblies go.
+        static readonly ConditionalWeakTable<Assembly, Dictionary<string, List<string>>> Index =
+            new ConditionalWeakTable<Assembly, Dictionary<string, List<string>>>();
+
         public static IReadOnlyDictionary<string, IReadOnlyList<string>> FindNamespaces(IEnumerable<string> simpleNames)
         {
-            var wanted = new HashSet<string>(simpleNames, StringComparer.Ordinal);
             var found = new Dictionary<string, SortedSet<string>>(StringComparer.Ordinal);
-            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+            var wanted = simpleNames.Distinct(StringComparer.Ordinal).ToList();
+            foreach (var assembly in LoadedAssemblies.Host())
             {
-                if (assembly.IsDynamic || (assembly.GetName().Name ?? "").StartsWith(CodeRunner.SnippetAssemblyPrefix, StringComparison.Ordinal))
-                    continue;
-                Type[] types;
-                try { types = assembly.GetExportedTypes(); }
-                catch (Exception) { continue; } // assemblies whose dependencies are missing cannot list their types
-                foreach (var type in types)
+                var index = Index.GetValue(assembly, Build);
+                foreach (var name in wanted)
                 {
-                    if (type.IsNested || string.IsNullOrEmpty(type.Namespace))
+                    if (!index.TryGetValue(name, out var namespaces))
                         continue;
-                    var name = type.Name;
-                    var tick = name.IndexOf('`');
-                    if (tick > 0)
-                        name = name.Substring(0, tick);
-                    if (!wanted.Contains(name))
-                        continue;
-                    if (!found.TryGetValue(name, out var namespaces))
-                        found[name] = namespaces = new SortedSet<string>(StringComparer.Ordinal);
-                    namespaces.Add(type.Namespace!);
+                    if (!found.TryGetValue(name, out var set))
+                        found[name] = set = new SortedSet<string>(StringComparer.Ordinal);
+                    set.UnionWith(namespaces);
                 }
             }
             return found.ToDictionary(kv => kv.Key, kv => (IReadOnlyList<string>)kv.Value.ToList(), StringComparer.Ordinal);
+        }
+
+        static Dictionary<string, List<string>> Build(Assembly assembly)
+        {
+            var index = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+            Type[] types;
+            try { types = assembly.GetExportedTypes(); }
+            catch (Exception) { return index; } // assemblies whose dependencies are missing cannot list their types
+            foreach (var type in types)
+            {
+                if (type.IsNested || string.IsNullOrEmpty(type.Namespace))
+                    continue;
+                var name = TypeNames.StripArity(type.Name, out _);
+                if (!index.TryGetValue(name, out var namespaces))
+                    index[name] = namespaces = new List<string>();
+                if (!namespaces.Contains(type.Namespace!))
+                    namespaces.Add(type.Namespace!);
+            }
+            return index;
         }
     }
 
@@ -97,15 +112,7 @@ namespace com.IvanMurzak.CodeExec
             {
                 if (i > 0)
                     sb.Append('.');
-                var name = chain[i].Name;
-                var tick = name.IndexOf('`');
-                var arity = 0;
-                if (tick > 0)
-                {
-                    arity = int.Parse(name.Substring(tick + 1));
-                    name = name.Substring(0, tick);
-                }
-                sb.Append(name);
+                sb.Append(StripArity(chain[i].Name, out var arity));
                 if (arity > 0)
                 {
                     sb.Append('<').Append(string.Join(", ", arguments.Skip(used).Take(arity).Select(ToCSharp))).Append('>');
@@ -113,6 +120,14 @@ namespace com.IvanMurzak.CodeExec
                 }
             }
             return sb.ToString();
+        }
+
+        /// <summary><c>List`1</c> → <c>List</c> (arity 1).</summary>
+        internal static string StripArity(string name, out int arity)
+        {
+            var tick = name.IndexOf('`');
+            arity = tick > 0 ? int.Parse(name.Substring(tick + 1)) : 0;
+            return tick > 0 ? name.Substring(0, tick) : name;
         }
     }
 
@@ -149,15 +164,21 @@ namespace com.IvanMurzak.CodeExec
             public LineWriter(Action<string> line) { _line = line; }
             public override Encoding Encoding => Encoding.UTF8;
 
-            public override void Write(char value)
+            public override void Write(char value) => Write(value.ToString());
+
+            public override void Write(char[] buffer, int index, int count) => Write(new string(buffer, index, count));
+
+            public override void Write(string? value)
             {
-                if (value == '\n')
-                {
-                    EmitLine();
+                if (string.IsNullOrEmpty(value))
                     return;
+                var start = 0;
+                for (int newline; (newline = value!.IndexOf('\n', start)) >= 0; start = newline + 1)
+                {
+                    _buffer.Append(value, start, newline - start);
+                    EmitLine();
                 }
-                if (value != '\r')
-                    _buffer.Append(value);
+                _buffer.Append(value, start, value.Length - start);
             }
 
             public override void Flush()
@@ -168,6 +189,8 @@ namespace com.IvanMurzak.CodeExec
 
             void EmitLine()
             {
+                if (_buffer.Length > 0 && _buffer[_buffer.Length - 1] == '\r')
+                    _buffer.Length--;
                 _line(_buffer.ToString());
                 _buffer.Clear();
             }

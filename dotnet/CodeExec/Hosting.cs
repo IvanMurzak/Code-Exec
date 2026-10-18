@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Reflection;
 using System.Threading;
 #if NET8_0_OR_GREATER
@@ -23,7 +24,7 @@ namespace com.IvanMurzak.CodeExec
 
     /// <summary>
     /// Plain <c>Assembly.Load</c> — the only option on Mono (Unity) and .NET Framework. Nothing is unloaded until the
-    /// domain goes away, which is why <see cref="CodeRunner"/> reuses loaded assemblies for identical requests.
+    /// domain goes away, which is why <see cref="CodeRunner"/> keeps loaded assemblies for identical requests.
     /// </summary>
     public sealed class DefaultAssemblyHost : IAssemblyHost
     {
@@ -31,10 +32,15 @@ namespace com.IvanMurzak.CodeExec
 
         public DefaultAssemblyHost()
         {
-            // Assemblies loaded from bytes (snippets, or a host's in-memory game assembly) are not bound automatically
-            // when another assembly references them (.NET Framework, Mono): resolve by name among loaded ones.
+            // Assemblies loaded from bytes are not bound automatically when a snippet references them (.NET Framework,
+            // Mono). Answer only for snippets, so binding failures elsewhere in the host stay untouched.
             if (Interlocked.Exchange(ref _resolverInstalled, 1) == 0)
-                AppDomain.CurrentDomain.AssemblyResolve += (_, args) => AssemblyLookup.FindLoaded(new AssemblyName(args.Name).Name);
+            {
+                AppDomain.CurrentDomain.AssemblyResolve += (_, args) =>
+                    args.RequestingAssembly == null || LoadedAssemblies.IsSnippet(args.RequestingAssembly)
+                        ? LoadedAssemblies.Find(new AssemblyName(args.Name).Name)
+                        : null;
+            }
         }
 
         public bool SupportsUnload => false;
@@ -69,7 +75,7 @@ namespace com.IvanMurzak.CodeExec
             return new Loaded(context, context.LoadFromStream(imageStream, symbolStream));
         }
 
-        static Assembly? ResolveFromLoaded(AssemblyLoadContext context, AssemblyName name) => AssemblyLookup.FindLoaded(name.Name);
+        static Assembly? ResolveFromLoaded(AssemblyLoadContext context, AssemblyName name) => LoadedAssemblies.Find(name.Name);
 
         sealed class Loaded : ILoadedAssembly
         {
@@ -81,7 +87,7 @@ namespace com.IvanMurzak.CodeExec
                 Assembly = assembly;
             }
 
-            public Assembly Assembly { get; private set; }
+            public Assembly Assembly { get; }
 
             public void Dispose()
             {
@@ -90,26 +96,10 @@ namespace com.IvanMurzak.CodeExec
                 _context.Resolving -= ResolveFromLoaded;
                 _context.Unload();
                 _context = null;
-                Assembly = null!;
             }
         }
     }
 #endif
-
-    static class AssemblyLookup
-    {
-        public static Assembly? FindLoaded(string? simpleName)
-        {
-            if (simpleName == null)
-                return null;
-            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
-            {
-                if (string.Equals(assembly.GetName().Name, simpleName, StringComparison.OrdinalIgnoreCase))
-                    return assembly;
-            }
-            return null;
-        }
-    }
 
     public static class AssemblyHosts
     {
@@ -121,6 +111,42 @@ namespace com.IvanMurzak.CodeExec
 #else
             return new DefaultAssemblyHost();
 #endif
+        }
+    }
+
+    /// <summary>The host's own assemblies: loaded, not dynamic, not snippets. One place for that filter.</summary>
+    static class LoadedAssemblies
+    {
+        public static bool IsSnippet(Assembly assembly) =>
+            assembly.FullName?.StartsWith(CodeRunner.SnippetAssemblyPrefix, StringComparison.Ordinal) == true;
+
+        public static IEnumerable<Assembly> Host()
+        {
+            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                if (!assembly.IsDynamic && !IsSnippet(assembly))
+                    yield return assembly;
+            }
+        }
+
+        public static Assembly? Find(string? simpleName)
+        {
+            if (simpleName == null)
+                return null;
+            foreach (var assembly in Host())
+            {
+                if (string.Equals(SimpleName(assembly), simpleName, StringComparison.OrdinalIgnoreCase))
+                    return assembly;
+            }
+            return null;
+        }
+
+        /// <summary>The simple name from the runtime-cached <see cref="Assembly.FullName"/> (no AssemblyName allocation).</summary>
+        public static string SimpleName(Assembly assembly)
+        {
+            var full = assembly.FullName ?? "";
+            var comma = full.IndexOf(',');
+            return comma < 0 ? full : full.Substring(0, comma);
         }
     }
 }

@@ -2,22 +2,30 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 
 namespace com.IvanMurzak.CodeExec
 {
-    /// <summary>Supplies the metadata references (assembly file paths) a snippet compiles against.</summary>
+    /// <summary>
+    /// Supplies the metadata references (assembly file paths) a snippet compiles against. Returning the SAME list instance
+    /// while nothing changed lets <see cref="CodeRunner"/> and the compiler skip re-hashing and re-reading references.
+    /// </summary>
     public interface IReferenceProvider
     {
         IReadOnlyList<string> GetReferencePaths();
     }
 
     /// <summary>
-    /// Every non-dynamic assembly loaded in the process that has a file on disk, one per simple name.
-    /// Snippet assemblies themselves are skipped.
+    /// Every host assembly loaded in the process that has a file on disk, one per simple name. The list is rebuilt only
+    /// when the set of host assemblies changes (snippet loads and unloads do not count). No event subscriptions: a
+    /// long-lived handler would pin a host that reloads its own code (Godot's collectible editor context).
     /// </summary>
     public sealed class LoadedAssembliesReferenceProvider : IReferenceProvider
     {
         readonly Func<Assembly, string?>? _locationResolver;
+        readonly object _lock = new object();
+        IReadOnlyList<string> _paths = Array.Empty<string>();
+        long _signature = -1;
 
         /// <param name="locationResolver">
         /// Host hook for assemblies loaded from memory (empty <see cref="Assembly.Location"/>): Godot loads the game
@@ -31,13 +39,27 @@ namespace com.IvanMurzak.CodeExec
 
         public IReadOnlyList<string> GetReferencePaths()
         {
-            var byName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+            long signature = 0;
+            foreach (var assembly in LoadedAssemblies.Host())
+                signature = signature * 31 + RuntimeHelpers.GetHashCode(assembly);
+            lock (_lock)
             {
-                if (assembly.IsDynamic)
-                    continue;
-                var name = assembly.GetName().Name;
-                if (name == null || byName.ContainsKey(name) || name.StartsWith(CodeRunner.SnippetAssemblyPrefix, StringComparison.Ordinal))
+                if (signature != _signature)
+                {
+                    _paths = Build();
+                    _signature = signature;
+                }
+                return _paths;
+            }
+        }
+
+        IReadOnlyList<string> Build()
+        {
+            var byName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var assembly in LoadedAssemblies.Host())
+            {
+                var name = LoadedAssemblies.SimpleName(assembly);
+                if (byName.ContainsKey(name))
                     continue;
                 var location = LocationOf(assembly);
                 if (location.Length > 0 && File.Exists(location))

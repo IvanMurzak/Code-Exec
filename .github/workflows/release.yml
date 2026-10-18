@@ -90,9 +90,10 @@ jobs:
             esac
           done
       # A full run before publishing is a deliberate gate, even when ci.yml already passed this commit.
-      - name: Test all (oldest + newest Roslyn, package consumer, Python)
+      - name: Test all (oldest + newest Roslyn, the packed packages above, Python)
         env:
           ROSLYN_VERSIONS: "3.8.0 5.9.0"
+          SKIP_PACK: "1"   # test exactly the .nupkg files that get uploaded and published
         run: scripts/test-all.sh
       - uses: actions/upload-artifact@v7
         with:

@@ -38,10 +38,13 @@ The snippet is parsed as C# **script** code and rewritten into one ordinary comp
 
 - `using` directives (including aliases and `using static`) go to the top, after the host defaults and `usings`;
 - type declarations (class, struct, record, interface, enum, delegate, namespace) stay top-level;
-- methods, properties, events and fields **with** modifiers become static members of the generated class;
-- statements — and fields **without** modifiers, i.e. `var x = 1;` — form the body of the entry method, in source order;
-- the **last statement**, when it is an expression without `;`, or an expression that is not a valid statement
-  (`x * 2;`), is returned; if that expression is `void`, it runs as a plain statement and the result is `null`;
+- members **without** modifiers live in the entry method's body, in source order, so they see the snippet's locals:
+  `var x = 1;` is a local variable and `int Twice(int n) => n * 2;` a local function;
+- members **with** modifiers (methods, properties, indexers, events, fields: `static int counter = 3;`) become static
+  members of the generated class;
+- the **last statement** (trailing local functions aside), when it is an expression without `;`, or an expression that
+  is not a valid statement (`x * 2;`), is returned; if that expression is `void`, it runs as a plain statement and the
+  result is `null`;
 - `return;` means `return null;`; any `return expr;` returns `expr`;
 - `await` anywhere in the statements (outside lambdas and local functions) makes the entry method asynchronous.
 

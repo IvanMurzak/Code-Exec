@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
-# Everything CI runs, locally: .NET tests (default Roslyn), pack + package consumer, Python tests.
-# Roslyn matrix: ROSLYN_VERSIONS="3.8.0 4.8.0 5.9.0" scripts/test-all.sh
+# Everything CI runs, locally: .NET tests, pack + package consumer, Python tests.
+#   ROSLYN_VERSIONS="3.8.0 4.8.0 5.9.0" scripts/test-all.sh   # several Roslyn lines (tests and consumer)
+#   SKIP_PACK=1 scripts/test-all.sh                          # consume the packages already in ./packages
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
-for v in ${ROSLYN_VERSIONS:-4.8.0}; do
+read -r -a versions <<<"${ROSLYN_VERSIONS:-4.8.0}"
+for v in "${versions[@]}"; do
   echo "== .NET tests, Roslyn $v"
   dotnet test "$root/dotnet/CodeExec.Tests/CodeExec.Tests.csproj" -c Release -p:RoslynVersion="$v"
 done
 echo "== pack + package consumer"
-"$root/scripts/pack.sh" "$root/packages"
-rm -rf "$root/dotnet/samples/PackageConsumer/obj" "$root/dotnet/samples/PackageConsumer/bin"
-dotnet run --project "$root/dotnet/samples/PackageConsumer/PackageConsumer.csproj"
+[ "${SKIP_PACK:-}" = "1" ] || "$root/scripts/pack.sh" "$root/packages" >/dev/null
+"$root/scripts/consume.sh" "${versions[@]}"
 echo "== Python tests"
 if command -v python3 >/dev/null; then python=(python3)
 elif command -v python >/dev/null; then python=(python)

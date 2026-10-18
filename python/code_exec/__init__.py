@@ -8,7 +8,7 @@ fixtures/golden/python.json.
     text = code_exec.run_b64(payload_base64_json)     # JSON in, JSON out: the entry point for C++ hosts
 """
 
-from .runner import run, run_json, run_b64, SNIPPET_FILE
+from .runner import run, run_json, run_b64, set_value_converter, SNIPPET_FILE
 
-__all__ = ["run", "run_json", "run_b64", "SNIPPET_FILE"]
+__all__ = ["run", "run_json", "run_b64", "set_value_converter", "SNIPPET_FILE"]
 __version__ = "0.1.0"

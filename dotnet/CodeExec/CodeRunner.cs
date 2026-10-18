@@ -83,8 +83,16 @@ namespace com.IvanMurzak.CodeExec
         readonly IAssemblyHost _host;
         readonly IReferenceProvider _references;
         readonly object _cacheLock = new object();
-        readonly Dictionary<string, LinkedListNode<KeyValuePair<string, CacheEntry>>> _cache = new Dictionary<string, LinkedListNode<KeyValuePair<string, CacheEntry>>>(StringComparer.Ordinal);
-        readonly LinkedList<KeyValuePair<string, CacheEntry>> _lru = new LinkedList<KeyValuePair<string, CacheEntry>>();
+        readonly Dictionary<string, LinkedListNode<(string Key, CacheEntry Entry)>> _cache = new Dictionary<string, LinkedListNode<(string Key, CacheEntry Entry)>>(StringComparer.Ordinal);
+        readonly LinkedList<(string Key, CacheEntry Entry)> _lru = new LinkedList<(string Key, CacheEntry Entry)>();
+
+        // Mono cannot unload: an evicted entry whose assembly is already loaded would be loaded AGAIN on the next
+        // identical request. Such entries move here (without their image bytes) and are never dropped.
+        readonly Dictionary<string, CacheEntry> _pinned = new Dictionary<string, CacheEntry>(StringComparer.Ordinal);
+
+        // The reference list instance is stable while nothing loads; hash it once per instance, not per request.
+        IReadOnlyList<string>? _hashedReferences;
+        string _referencesHash = "";
 
         public CodeRunner(ICSharpCompiler compiler, CodeRunnerOptions? options = null)
         {
@@ -139,7 +147,7 @@ namespace com.IvanMurzak.CodeExec
                 EntryMethod = string.IsNullOrWhiteSpace(request.EntryMethod) ? null : request.EntryMethod,
             };
 
-            var key = CacheKey(compileRequest, usings, request.AutoImport);
+            var key = CacheKey(compileRequest, usings, request.AutoImport, ReferencesHash(compileRequest.ReferencePaths));
             var cached = FromCache(key);
             if (cached != null)
             {
@@ -183,7 +191,7 @@ namespace com.IvanMurzak.CodeExec
                 autoImported.AddRange(added);
             }
 
-            if (!compiled.Success || compiled.Image == null)
+            if (compiled.Image == null)
             {
                 var failure = ExecuteResult.Fail(ErrorKind.Compile, "Compilation failed");
                 failure.Diagnostics = compiled.Diagnostics.Concat(ambiguous).ToList();
@@ -192,7 +200,7 @@ namespace com.IvanMurzak.CodeExec
                 return new PreparedSnippet(request, failure, null, false, failure.CompileMs);
             }
 
-            var entry = new CacheEntry(compiled.Image, compiled.Symbols, compiled.EntryType, compiled.EntryMethod, autoImported);
+            var entry = new CacheEntry(compileRequest.AssemblyName, compiled.Image, compiled.Symbols, compiled.EntryType, compiled.EntryMethod, autoImported);
             ToCache(key, entry);
             return new PreparedSnippet(request, null, entry, false, stopwatch.ElapsedMilliseconds);
         }
@@ -203,7 +211,7 @@ namespace com.IvanMurzak.CodeExec
             if (prepared.Failure != null)
                 return prepared.Failure;
             var run = Start(prepared);
-            if (run.Raw is Task task && !task.IsCompleted)
+            if (run.Pending != null)
                 run.Fail(ErrorKind.Timeout, "The snippet is asynchronous and did not finish synchronously; run it with RunAsync.");
             return run.Finish();
         }
@@ -214,7 +222,7 @@ namespace com.IvanMurzak.CodeExec
             if (prepared.Failure != null)
                 return prepared.Failure;
             var run = Start(prepared);
-            if (run.Raw is Task task && !task.IsCompleted)
+            if (run.Pending is Task task)
             {
                 var timeout = prepared.Request.TimeoutMs > 0 ? prepared.Request.TimeoutMs : Timeout.Infinite;
                 var finished = await Task.WhenAny(task, Task.Delay(timeout, cancellationToken));
@@ -233,10 +241,13 @@ namespace com.IvanMurzak.CodeExec
             var run = new Execution(this, prepared);
             try
             {
-                run.Loaded = entry.Loaded ?? _host.Load(entry.Image, entry.Symbols, entry.EntryType);
+                run.Loaded = entry.Loaded ?? _host.Load(entry.Image!, entry.Symbols, entry.AssemblyName);
                 if (!_host.SupportsUnload && entry.Loaded == null)
                 {
-                    entry.Loaded = run.Loaded; // Mono cannot unload: keep it so identical requests reuse it
+                    // Mono cannot unload: keep it so identical requests reuse it; the bytes are no longer needed.
+                    entry.Loaded = run.Loaded;
+                    entry.Image = null;
+                    entry.Symbols = null;
                     Interlocked.Increment(ref Stats.loadedAssemblies);
                 }
 
@@ -251,32 +262,32 @@ namespace com.IvanMurzak.CodeExec
                 }
 
                 run.BeginCapture(_options.LogCaptures);
-                run.Raw = method.Invoke(null, prepared.Request.Parameters.Select(p => p.Value).ToArray());
+                run.SetResult(method.ReturnType, method.Invoke(null, prepared.Request.Parameters.Select(p => p.Value).ToArray()));
             }
-            catch (TargetInvocationException e) when (e.InnerException != null)
+            catch (Exception e) when (e is TargetInvocationException || e is ArgumentException || e is BadImageFormatException || e is FileLoadException || e is TypeLoadException)
             {
-                run.Fail(ErrorKind.Runtime, FormatException(e.InnerException));
-            }
-            catch (Exception e) when (e is ArgumentException || e is BadImageFormatException || e is FileLoadException || e is TypeLoadException)
-            {
-                run.Fail(ErrorKind.Runtime, FormatException(e));
+                run.Fail(ErrorKind.Runtime, FormatException(e, run.Loaded?.Assembly));
             }
             return run;
         }
 
-        internal static string FormatException(Exception exception)
+        /// <summary><c>Type: message</c> plus only the stack frames of the snippet's own assembly (snippet and includes).</summary>
+        internal static string FormatException(Exception exception, Assembly? snippet)
         {
             while ((exception is TargetInvocationException || exception is AggregateException) && exception.InnerException != null)
                 exception = exception.InnerException;
             var sb = new StringBuilder(exception.GetType().FullName).Append(": ").Append(exception.Message);
-            foreach (var line in (exception.StackTrace ?? "").Split('\n'))
+            if (snippet == null)
+                return sb.ToString();
+            foreach (var frame in new StackTrace(exception, true).GetFrames() ?? Array.Empty<StackFrame>())
             {
-                var trimmed = line.TrimEnd('\r');
-                // Frames below the snippet (reflection, the runner) are noise for the agent.
-                if (trimmed.Contains("System.RuntimeMethodHandle") || trimmed.Contains("System.Reflection.") || trimmed.Contains("com.IvanMurzak.CodeExec.CodeRunner"))
-                    break;
-                if (trimmed.Trim().Length > 0)
-                    sb.Append('\n').Append(trimmed);
+                var method = frame.GetMethod();
+                if (method?.DeclaringType?.Assembly != snippet)
+                    continue;
+                sb.AppendLine().Append("   at ").Append(method.DeclaringType.FullName).Append('.').Append(method.Name);
+                var file = frame.GetFileName();
+                if (!string.IsNullOrEmpty(file))
+                    sb.Append(" in ").Append(file).Append(":line ").Append(frame.GetFileLineNumber());
             }
             return sb.ToString();
         }
@@ -289,34 +300,55 @@ namespace com.IvanMurzak.CodeExec
             return u.TrimEnd(';').Trim();
         }
 
-        static string CacheKey(CompileRequest request, IEnumerable<string> usings, bool autoImport)
+        string ReferencesHash(IReadOnlyList<string> references)
         {
-            var sb = new StringBuilder();
-            void Add(string? s) => sb.Append(s ?? "").Append('\0');
-            Add(request.Code);
-            Add(request.EntryType);
-            Add(request.EntryMethod);
-            Add(autoImport ? "1" : "0");
-            foreach (var u in usings) Add(u);
-            Add("|");
-            foreach (var p in request.Parameters) { Add(p.TypeName); Add(p.Name); }
-            Add("|");
-            foreach (var f in request.Includes) { Add(f.Path); Add(f.Text); }
-            Add("|");
-            foreach (var r in request.ReferencePaths) Add(r);
-            using (var sha = SHA256.Create())
-                return Convert.ToBase64String(sha.ComputeHash(Encoding.UTF8.GetBytes(sb.ToString())));
+            lock (_cacheLock)
+            {
+                if (!ReferenceEquals(references, _hashedReferences))
+                {
+                    _referencesHash = Hash(references);
+                    _hashedReferences = references;
+                }
+                return _referencesHash;
+            }
+        }
+
+        static string CacheKey(CompileRequest request, IEnumerable<string> usings, bool autoImport, string referencesHash)
+        {
+            var parts = new List<string?> { request.Code, request.EntryType, request.EntryMethod, autoImport ? "1" : "0", referencesHash };
+            parts.AddRange(usings);
+            parts.Add("|");
+            foreach (var p in request.Parameters) { parts.Add(p.TypeName); parts.Add(p.Name); }
+            parts.Add("|");
+            foreach (var f in request.Includes) { parts.Add(f.Path); parts.Add(f.Text); }
+            return Hash(parts);
+        }
+
+        static string Hash(IEnumerable<string?> parts)
+        {
+            using (var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256))
+            {
+                var separator = new byte[] { 0 };
+                foreach (var part in parts)
+                {
+                    hash.AppendData(Encoding.UTF8.GetBytes(part ?? ""));
+                    hash.AppendData(separator);
+                }
+                return Convert.ToBase64String(hash.GetHashAndReset());
+            }
         }
 
         CacheEntry? FromCache(string key)
         {
             lock (_cacheLock)
             {
+                if (_pinned.TryGetValue(key, out var pinned))
+                    return pinned;
                 if (!_cache.TryGetValue(key, out var node))
                     return null;
                 _lru.Remove(node);
                 _lru.AddFirst(node);
-                return node.Value.Value;
+                return node.Value.Entry;
             }
         }
 
@@ -326,22 +358,25 @@ namespace com.IvanMurzak.CodeExec
                 return;
             lock (_cacheLock)
             {
-                if (_cache.ContainsKey(key))
+                if (_cache.ContainsKey(key) || _pinned.ContainsKey(key))
                     return;
-                _cache[key] = _lru.AddFirst(new KeyValuePair<string, CacheEntry>(key, entry));
+                _cache[key] = _lru.AddFirst((key, entry));
                 while (_cache.Count > _options.CacheCapacity)
                 {
-                    var last = _lru.Last!;
+                    var (lastKey, lastEntry) = _lru.Last!.Value;
                     _lru.RemoveLast();
-                    _cache.Remove(last.Value.Key);
+                    _cache.Remove(lastKey);
+                    if (lastEntry.Loaded != null)
+                        _pinned[lastKey] = lastEntry;
                 }
             }
         }
 
         internal sealed class CacheEntry
         {
-            public CacheEntry(byte[] image, byte[]? symbols, string entryType, string entryMethod, IReadOnlyList<string> autoImported)
+            public CacheEntry(string assemblyName, byte[] image, byte[]? symbols, string entryType, string entryMethod, IReadOnlyList<string> autoImported)
             {
+                AssemblyName = assemblyName;
                 Image = image;
                 Symbols = symbols;
                 EntryType = entryType;
@@ -349,8 +384,11 @@ namespace com.IvanMurzak.CodeExec
                 AutoImported = autoImported;
             }
 
-            public byte[] Image { get; }
-            public byte[]? Symbols { get; }
+            public string AssemblyName { get; }
+
+            /// <summary>Dropped once a non-unloadable host has loaded the assembly for good.</summary>
+            public byte[]? Image { get; set; }
+            public byte[]? Symbols { get; set; }
             public string EntryType { get; }
             public string EntryMethod { get; }
             public IReadOnlyList<string> AutoImported { get; }
@@ -369,6 +407,9 @@ namespace com.IvanMurzak.CodeExec
             readonly List<IDisposable> _captures = new List<IDisposable>();
             ErrorKind _errorKind;
             string? _error;
+            object? _raw;
+            Task? _task;
+            bool _taskHasResult;
 
             public Execution(CodeRunner runner, PreparedSnippet prepared)
             {
@@ -377,7 +418,27 @@ namespace com.IvanMurzak.CodeExec
             }
 
             public ILoadedAssembly? Loaded { get; set; }
-            public object? Raw { get; set; }
+
+            /// <summary>The snippet's task while its result is still to come; null for synchronous results.</summary>
+            public Task? Pending { get; private set; }
+
+            /// <summary>Records the invocation result, judged by the DECLARED return type (Task, Task&lt;T&gt;, ValueTask, ValueTask&lt;T&gt;).</summary>
+            public void SetResult(Type declared, object? raw)
+            {
+                var generic = declared.IsGenericType ? declared.GetGenericTypeDefinition() : null;
+                var name = (generic ?? declared).FullName;
+                // ValueTask is not part of netstandard2.0: recognise it by name and turn it into a Task.
+                var isValueTask = name == "System.Threading.Tasks.ValueTask" || name == "System.Threading.Tasks.ValueTask`1";
+                if (raw != null && isValueTask)
+                    raw = declared.GetMethod("AsTask", Type.EmptyTypes)!.Invoke(raw, null);
+                if (raw is Task task && (isValueTask || typeof(Task).IsAssignableFrom(declared)))
+                {
+                    _task = task;
+                    _taskHasResult = generic != null;
+                    Pending = task.IsCompleted ? null : task;
+                }
+                _raw = raw;
+            }
 
             public void Fail(ErrorKind kind, string error)
             {
@@ -399,11 +460,11 @@ namespace com.IvanMurzak.CodeExec
                 try
                 {
                     if (_errorKind == ErrorKind.None)
-                        value = _runner._options.ValueConverter(Unwrap(Raw));
+                        value = _runner._options.ValueConverter(Result());
                 }
                 catch (Exception e)
                 {
-                    Fail(ErrorKind.Runtime, FormatException(e));
+                    Fail(ErrorKind.Runtime, FormatException(e, Loaded?.Assembly));
                 }
                 finally
                 {
@@ -411,12 +472,13 @@ namespace com.IvanMurzak.CodeExec
                         _captures[i].Dispose();
                     if (_runner._host.SupportsUnload)
                         Loaded?.Dispose();
-                    Raw = null;
+                    _raw = null;
+                    _task = null;
+                    Pending = null;
                 }
 
                 List<LogEntry> logs;
                 lock (_logs) logs = new List<LogEntry>(_logs);
-                var entry = _prepared.Entry!;
                 return new ExecuteResult
                 {
                     Success = _errorKind == ErrorKind.None,
@@ -424,28 +486,20 @@ namespace com.IvanMurzak.CodeExec
                     Logs = logs,
                     ErrorKind = _errorKind,
                     Error = _error,
-                    AutoImported = entry.AutoImported,
+                    AutoImported = _prepared.Entry!.AutoImported,
                     CompileMs = _prepared.CompileMs,
                     ExecuteMs = _stopwatch.ElapsedMilliseconds,
                     CacheHit = _prepared.CacheHit,
                 };
             }
 
-            /// <summary>A finished Task → its result (or its exception); anything else as is.</summary>
-            object? Unwrap(object? raw)
+            /// <summary>A finished task → its value (its exception is rethrown as is); anything else unchanged.</summary>
+            object? Result()
             {
-                if (!(raw is Task task))
-                    return raw;
-                if (task.IsFaulted)
-                    throw new TargetInvocationException(task.Exception!.InnerException ?? task.Exception);
-                if (task.IsCanceled)
-                    throw new OperationCanceledException("The snippet's task was canceled.");
-                var type = task.GetType();
-                if (!type.IsGenericType)
-                    return null;
-                var result = type.GetProperty("Result")!.GetValue(task);
-                // async Task (no value) is surfaced by the runtime as Task<VoidTaskResult>.
-                return result != null && result.GetType().FullName == "System.Threading.Tasks.VoidTaskResult" ? null : result;
+                if (_task == null)
+                    return _raw;
+                _task.GetAwaiter().GetResult();
+                return _taskHasResult ? _task.GetType().GetProperty("Result")!.GetValue(_task) : null;
             }
         }
     }
