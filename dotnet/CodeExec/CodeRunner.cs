@@ -110,7 +110,7 @@ namespace com.IvanMurzak.CodeExec
         public ExecuteResult Execute(ExecuteRequest request) => Run(Prepare(request));
 
         public Task<ExecuteResult> ExecuteAsync(ExecuteRequest request, CancellationToken cancellationToken = default) =>
-            RunAsync(Prepare(request), cancellationToken);
+            RunAsync(Prepare(request), null, cancellationToken);
 
         public PreparedSnippet Prepare(ExecuteRequest request)
         {
@@ -201,28 +201,35 @@ namespace com.IvanMurzak.CodeExec
                 return new PreparedSnippet(request, failure, null, false, failure.CompileMs);
             }
 
-            var entry = new CacheEntry(compileRequest.AssemblyName, compiled, autoImported);
+            var entry = new CacheEntry(key, compileRequest.AssemblyName, compiled, autoImported);
             ToCache(key, entry);
             return new PreparedSnippet(request, null, entry, false, stopwatch.ElapsedMilliseconds);
         }
 
-        /// <summary>Invokes a prepared snippet synchronously. An unfinished asynchronous result is a <see cref="ErrorKind.Timeout"/>: use <see cref="RunAsync"/>.</summary>
-        public ExecuteResult Run(PreparedSnippet prepared)
+        /// <summary>
+        /// Invokes a prepared snippet synchronously. An unfinished asynchronous result is a <see cref="ErrorKind.Timeout"/>:
+        /// use <see cref="RunAsync"/>. <paramref name="values"/> replaces the parameter values of the request (same order and
+        /// count): a host can compile off its main thread with the parameter TYPES and supply the values at run time.
+        /// </summary>
+        public ExecuteResult Run(PreparedSnippet prepared, IReadOnlyList<object?>? values = null)
         {
             if (prepared.Failure != null)
                 return prepared.Failure;
-            var run = Start(prepared);
+            var run = Start(prepared, values);
             if (run.Pending != null)
                 run.Fail(ErrorKind.Timeout, "The snippet is asynchronous and did not finish synchronously; run it with RunAsync.");
             return run.Finish();
         }
 
-        /// <summary>Invokes a prepared snippet; an asynchronous result is awaited (continuations stay on the caller's context).</summary>
-        public async Task<ExecuteResult> RunAsync(PreparedSnippet prepared, CancellationToken cancellationToken = default)
+        /// <summary>
+        /// Invokes a prepared snippet; an asynchronous result is awaited (continuations stay on the caller's context).
+        /// <paramref name="values"/>: see <see cref="Run"/>.
+        /// </summary>
+        public async Task<ExecuteResult> RunAsync(PreparedSnippet prepared, IReadOnlyList<object?>? values = null, CancellationToken cancellationToken = default)
         {
             if (prepared.Failure != null)
                 return prepared.Failure;
-            var run = Start(prepared);
+            var run = Start(prepared, values);
             if (run.Pending is Task task)
             {
                 var timeout = prepared.Request.TimeoutMs > 0 ? prepared.Request.TimeoutMs : Timeout.Infinite;
@@ -240,37 +247,33 @@ namespace com.IvanMurzak.CodeExec
             return run.Finish();
         }
 
-        Execution Start(PreparedSnippet prepared)
+        Execution Start(PreparedSnippet prepared, IReadOnlyList<object?>? values)
         {
             Interlocked.Increment(ref Stats.executions);
             var entry = prepared.Entry!;
             var run = new Execution(this, prepared);
             try
             {
-                run.Loaded = entry.Loaded ?? _host.Load(entry.Image!, entry.Symbols, entry.AssemblyName);
-                if (!_host.SupportsUnload && entry.Loaded == null)
+                var parameters = prepared.Request.Parameters;
+                if (values != null && values.Count != parameters.Count)
                 {
-                    // Mono cannot unload: keep it so identical requests reuse it; the bytes are no longer needed.
-                    entry.Loaded = run.Loaded;
-                    entry.Image = null;
-                    entry.Symbols = null;
-                    Interlocked.Increment(ref Stats.loadedAssemblies);
+                    run.Fail(ErrorKind.InvalidRequest, $"{values.Count} value(s) given for {parameters.Count} parameter(s).");
+                    return run;
                 }
+                run.Loaded = Load(entry);
 
-                var count = prepared.Request.Parameters.Count;
                 var type = run.Loaded.Assembly.GetType(entry.EntryType, throwOnError: false);
-                var method = type?.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static)
-                    .FirstOrDefault(m => m.Name == entry.EntryMethod && m.GetParameters().Length == count);
+                var method = EntryMethod(type, entry.EntryMethod, parameters);
                 if (method == null)
                 {
-                    run.Fail(ErrorKind.EntryPointNotFound, $"Static method '{entry.EntryType}.{entry.EntryMethod}' with {count} parameter(s) not found.");
+                    run.Fail(ErrorKind.EntryPointNotFound, $"Static method '{entry.EntryType}.{entry.EntryMethod}' with {parameters.Count} parameter(s) not found.");
                     return run;
                 }
 
                 var declared = new DeclaredResult(method.ReturnType);
                 run.ReturnType = entry.ResultType ?? declared.YieldsName; // the compiler knows a snippet's real result type
                 run.BeginCapture(_options.LogCaptures);
-                run.SetResult(declared, method.Invoke(null, prepared.Request.Parameters.Select(p => p.Value).ToArray()));
+                run.SetResult(declared, method.Invoke(null, values?.ToArray() ?? parameters.Select(p => p.Value).ToArray()));
             }
             catch (Exception e)
             {
@@ -279,6 +282,40 @@ namespace com.IvanMurzak.CodeExec
                 run.Fail(ErrorKind.Runtime, FormatException(e, run.Loaded?.Assembly));
             }
             return run;
+        }
+
+        /// <summary>
+        /// Loads the entry's assembly. A host that cannot unload (Mono) loads it once, under the cache lock: the bytes are
+        /// dropped, and an entry evicted from the LRU in the meantime is pinned so the next identical request reuses it.
+        /// </summary>
+        ILoadedAssembly Load(CacheEntry entry)
+        {
+            if (_host.SupportsUnload)
+                return _host.Load(entry.Image!, entry.Symbols, entry.AssemblyName);
+            lock (_cacheLock)
+            {
+                if (entry.Loaded == null)
+                {
+                    entry.Loaded = _host.Load(entry.Image!, entry.Symbols, entry.AssemblyName);
+                    entry.Image = null;
+                    entry.Symbols = null;
+                    Interlocked.Increment(ref Stats.loadedAssemblies);
+                    if (_options.CacheCapacity > 0 && !_cache.ContainsKey(entry.Key))
+                        _pinned[entry.Key] = entry;
+                }
+                return entry.Loaded;
+            }
+        }
+
+        /// <summary>The static method by name and parameter count; among overloads, the one the parameter types fit.</summary>
+        static MethodInfo? EntryMethod(Type? type, string name, IReadOnlyList<SnippetParameter> parameters)
+        {
+            var candidates = type?.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static)
+                .Where(m => m.Name == name && m.GetParameters().Length == parameters.Count)
+                .ToList() ?? new List<MethodInfo>();
+            return candidates.FirstOrDefault(m => m.GetParameters().Select((p, i) => p.ParameterType.IsAssignableFrom(parameters[i].Type)).All(ok => ok))
+                ?? candidates.FirstOrDefault();
+
         }
 
         /// <summary>
@@ -419,8 +456,9 @@ namespace com.IvanMurzak.CodeExec
 
         internal sealed class CacheEntry
         {
-            public CacheEntry(string assemblyName, CompileResult compiled, IReadOnlyList<string> autoImported)
+            public CacheEntry(string key, string assemblyName, CompileResult compiled, IReadOnlyList<string> autoImported)
             {
+                Key = key;
                 AssemblyName = assemblyName;
                 Image = compiled.Image;
                 Symbols = compiled.Symbols;
@@ -430,6 +468,7 @@ namespace com.IvanMurzak.CodeExec
                 AutoImported = autoImported;
             }
 
+            public string Key { get; }
             public string AssemblyName { get; }
 
             /// <summary>Dropped once a non-unloadable host has loaded the assembly for good.</summary>
