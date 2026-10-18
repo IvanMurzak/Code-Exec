@@ -87,19 +87,22 @@ namespace CodeExecTests
         [Fact]
         public void ValuesCanBeSuppliedAtRunTime()
         {
-            // A host compiles off its main thread with parameter TYPES only and supplies the values when it runs.
+            // A host compiles off its main thread with parameter TYPES only and binds the values when it runs.
             var runner = Fixtures.Runner();
             var prepared = runner.Prepare(new ExecuteRequest { Code = "a * 2", Parameters = new[] { new SnippetParameter("a", typeof(int), null) } });
-            Assert.Equal("42", runner.Run(prepared, new object?[] { 21 }).Value);
-            Assert.Equal(ErrorKind.InvalidRequest, runner.Run(prepared, new object?[] { 1, 2 }).ErrorKind);
+            Assert.Equal("42", runner.Run(prepared.WithValues(new object?[] { 21 })).Value);
+            Assert.Equal("10", runner.Run(prepared.WithValues(new object?[] { 5 })).Value);
+            Assert.Equal(ErrorKind.InvalidRequest, runner.Run(prepared.WithValues(new object?[] { 1, 2 })).ErrorKind);
+            Assert.Equal(ErrorKind.InvalidRequest, runner.Run(prepared.WithValues(new object?[] { "21" })).ErrorKind);
+            Assert.Equal(ErrorKind.InvalidRequest, runner.Run(prepared.WithValues(new object?[] { null })).ErrorKind);
         }
 
         [Fact]
-        public void OverloadIsChosenByParameterTypes()
+        public void MostSpecificOverloadIsChosen()
         {
             var result = Fixtures.Runner().Execute(new ExecuteRequest
             {
-                Code = "public static class Entry { public static string Run(int v) => \"int\"; public static string Run(string v) => \"string\"; }",
+                Code = "public static class Entry { public static string Run(object v) => \"object\"; public static string Run(string v) => \"string\"; public static string Run(int v) => \"int\"; }",
                 EntryType = "Entry",
                 EntryMethod = "Run",
                 Parameters = new[] { new SnippetParameter("v", typeof(string), "x") },
