@@ -1,0 +1,90 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_NOLOGO: "1"
+
+jobs:
+  # The adapter ships as SOURCE and compiles against the consumer's Roslyn: test the same source on every
+  # supported Roslyn line. 3.8.0 is the floor the package is authored against.
+  dotnet:
+    name: dotnet (Roslyn ${{ matrix.roslyn }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        roslyn: ["3.8.0", "4.0.1", "4.8.0", "4.14.0", "5.9.0"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+      - name: Test (net8.0, net10.0)
+        run: dotnet test dotnet/CodeExec.Tests/CodeExec.Tests.csproj -c Release -p:RoslynVersion=${{ matrix.roslyn }}
+
+  # .NET Framework runs the netstandard2.0 build with the non-collectible host: the path Unity (Mono) takes.
+  netfx:
+    name: dotnet net48 (Roslyn ${{ matrix.roslyn }})
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        roslyn: ["3.8.0", "4.8.0"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+      - name: Test (net48)
+        run: dotnet test dotnet/CodeExec.Tests/CodeExec.Tests.csproj -c Release -f net48 -p:IncludeNetFx=true -p:RoslynVersion=${{ matrix.roslyn }}
+
+  package:
+    name: pack + strict consumer
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+      - name: Pack and check the packages' shape
+        run: scripts/pack.sh packages
+      - name: Consume the packages (Roslyn 3.8.0 and 5.9.0)
+        run: scripts/consume.sh 3.8.0 5.9.0
+
+  python:
+    name: python ${{ matrix.python }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Test
+        run: python -B -m unittest discover -s python/tests -v

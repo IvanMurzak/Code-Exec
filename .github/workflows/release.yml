@@ -1,0 +1,157 @@
+name: Release
+
+# Releases ONLY by a manual dispatch (as RQL / ReflectorNet / McpPlugin). Merging a version bump to `main` publishes nothing.
+# Order: guard -> pack + package checks + version checks -> full test suite -> NuGet publish of BOTH packages (Trusted
+# Publishing) -> verify both are live -> tag nuget-v<version> + GitHub Release. The tag is created only after the
+# packages are live, so re-dispatching the same commit after a failed publish / verify is always possible
+# (--skip-duplicate); a version already live from another commit fails the run.
+#
+#   gh workflow run release.yml -R IvanMurzak/Code-Exec --ref main -f dry_run=true
+#   gh workflow run release.yml -R IvanMurzak/Code-Exec --ref main -f dry_run=false
+#
+# NuGet Trusted Publishing: nuget.org account IvanMurzak needs a policy for repository IvanMurzak/Code-Exec, workflow
+# release.yml, covering com.IvanMurzak.CodeExec and com.IvanMurzak.CodeExec.Roslyn.
+# Version = <Version> in dotnet/Directory.Build.props. The Python module is vendored by its hosts, not published.
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Run every test and the pack, publish NOTHING (no NuGet push, no tag, no GitHub Release)."
+        required: false
+        default: false
+        type: boolean
+      release_notes:
+        description: "Optional markdown appended to the GitHub Release body."
+        required: false
+        default: ""
+        type: string
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_NOLOGO: "1"
+  PACKAGE_IDS: com.IvanMurzak.CodeExec com.IvanMurzak.CodeExec.Roslyn
+
+jobs:
+  test-and-pack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    outputs:
+      version: ${{ steps.pack.outputs.version }}
+    steps:
+      - name: Ref guard
+        if: inputs.dry_run != true && github.ref != 'refs/heads/main'
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          echo "::error::A real release must be dispatched on refs/heads/main (got '$REF'). Use dry_run=true on other refs."
+          exit 1
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      # Pack and the version checks run first so a forgotten version bump fails in minutes, not after the full suite.
+      - name: Pack + check the packages
+        id: pack
+        run: |
+          version=$(scripts/pack.sh ./packages)   # fails the step when the pack or a package check fails
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Tag must not exist; a version already on NuGet must come from this commit
+        env:
+          VERSION: ${{ steps.pack.outputs.version }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          fail() { if [ "$DRY_RUN" = "true" ]; then echo "::warning::$1 (a real run would fail here)."; else echo "::error::$1"; exit 1; fi; }
+          bump="bump <Version> in dotnet/Directory.Build.props on main, then dispatch again"
+          rc=0; git ls-remote --exit-code --tags origin "refs/tags/nuget-v$VERSION" >/dev/null || rc=$?
+          case $rc in
+            0) fail "Tag nuget-v$VERSION already exists: $bump" ;;
+            2) ;;   # no such tag
+            *) echo "::error::git ls-remote failed (exit $rc)"; exit 1 ;;
+          esac
+          for package in $PACKAGE_IDS; do
+            id=${package,,}; v=${VERSION,,}; nuspec="$RUNNER_TEMP/$id.nuspec"
+            code=$(curl -sS -o "$nuspec" -w '%{http_code}' --max-time 30 "https://api.nuget.org/v3-flatcontainer/$id/$v/$id.nuspec")
+            case $code in
+              404) ;;   # not published yet
+              200) grep -qF "commit=\"$GITHUB_SHA\"" "$nuspec" || fail "$package $VERSION is already on NuGet from another commit: $bump" ;;
+              *) echo "::error::NuGet lookup failed for $package (HTTP $code)"; exit 1 ;;
+            esac
+          done
+      # A full run before publishing is a deliberate gate, even when ci.yml already passed this commit.
+      - name: Test all (oldest + newest Roslyn, the packed packages above, Python)
+        env:
+          ROSLYN_VERSIONS: "3.8.0 5.9.0"
+          SKIP_PACK: "1"   # test exactly the .nupkg files that get uploaded and published
+        run: scripts/test-all.sh
+      - uses: actions/upload-artifact@v7
+        with:
+          name: nupkg
+          path: ./packages/*.nupkg
+          if-no-files-found: error
+
+  publish:
+    needs: test-and-pack
+    if: inputs.dry_run != true
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      id-token: write   # NuGet Trusted Publishing (OIDC); no API key is stored anywhere
+      contents: write   # tag + GitHub Release, after the packages are verified live
+    env:
+      VERSION: ${{ needs.test-and-pack.outputs.version }}
+    steps:
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 8.0.x
+      - uses: actions/download-artifact@v7
+        with:
+          name: nupkg
+          path: ./packages
+      - name: Login to NuGet with Trusted Publishing
+        id: nuget_login
+        uses: NuGet/login@v1
+        with:
+          user: IvanMurzak
+      - name: Publish to NuGet
+        env:
+          NUGET_API_KEY: ${{ steps.nuget_login.outputs.NUGET_API_KEY }}
+        run: |
+          # Core first: the source-only package depends on it.
+          for package in $PACKAGE_IDS; do
+            dotnet nuget push "./packages/$package.$VERSION.nupkg" --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
+          done
+      - name: Verify the versions are live on NuGet
+        run: |
+          for package in $PACKAGE_IDS; do
+            live=false
+            for i in $(seq 1 60); do
+              if curl -fsS --max-time 20 "https://api.nuget.org/v3-flatcontainer/${package,,}/index.json" | grep -qF "\"${VERSION,,}\""; then
+                echo "$package $VERSION is live"; live=true; break
+              fi
+              sleep 20
+            done
+            [ "$live" = true ] || { echo "::error::$package $VERSION did not appear on NuGet within 20 minutes"; exit 1; }
+          done
+      - name: Tag + GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: nuget-v${{ env.VERSION }}
+          name: Code-Exec ${{ env.VERSION }} (NuGet)
+          target_commitish: ${{ github.sha }}
+          files: ./packages/*.nupkg
+          body: |
+            NuGet: https://www.nuget.org/packages/com.IvanMurzak.CodeExec/${{ env.VERSION }} and https://www.nuget.org/packages/com.IvanMurzak.CodeExec.Roslyn/${{ env.VERSION }}
+
+            ${{ inputs.release_notes }}

@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    SOURCE-ONLY package com.IvanMurzak.CodeExec.Roslyn: the ICSharpCompiler implementation over Roslyn.
+    Same recipe as the Godot-MCP extensions (docs/source-only-nuget-recipe.md there):
+      1. IncludeBuildOutput=false — this project's DLL is NOT shipped;
+      2. the .cs files ship under src/ and build/com.IvanMurzak.CodeExec.Roslyn.props adds them to the consumer's
+         <Compile> items, so they compile against the CONSUMER's Microsoft.CodeAnalysis.CSharp;
+      3. Roslyn is referenced here only to author the code, PrivateAssets=all: it is NOT a package dependency.
+    Authoring against the OLDEST supported Roslyn (3.8.0) and C# 9 is what guarantees newer consumers compile it;
+    CI re-checks the same source against the newer versions.
+  -->
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <LangVersion>9.0</LangVersion>
+    <AssemblyName>com.IvanMurzak.CodeExec.Roslyn.Authoring</AssemblyName>
+    <IsPackable>true</IsPackable>
+    <PackageId>com.IvanMurzak.CodeExec.Roslyn</PackageId>
+    <Title>Code-Exec Roslyn adapter (source-only)</Title>
+    <Description>Source-only Roslyn compiler for com.IvanMurzak.CodeExec. Compiles inside your project against YOUR Microsoft.CodeAnalysis.CSharp (3.8 or newer) — add that package yourself.</Description>
+    <PackageTags>csharp;roslyn;scripting;eval;source-only;unity;godot;game-dev;ai;mcp</PackageTags>
+    <PackageReadmeFile>PACKAGE.md</PackageReadmeFile>
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <EnableDefaultNoneItems>false</EnableDefaultNoneItems>
+    <!-- NU5128: source-only package (dependencies but no lib/) is expected. -->
+    <NoWarn>$(NoWarn);NU5128</NoWarn>
+    <DevelopmentDependency>false</DevelopmentDependency>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="src/**/*.cs" />
+    <ProjectReference Include="../CodeExec/CodeExec.csproj" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="3.8.0" PrivateAssets="all" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="src/**/*.cs" Pack="true" PackagePath="src/" />
+    <None Include="build/com.IvanMurzak.CodeExec.Roslyn.props" Pack="true" PackagePath="build/" />
+    <None Include="../../LICENSE.md" Pack="true" PackagePath="" />
+    <None Include="../PACKAGE.md" Pack="true" PackagePath="" />
+  </ItemGroup>
+</Project>

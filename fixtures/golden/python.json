@@ -1,0 +1,23 @@
+{
+  "includeRoot": "fixtures/include/python",
+  "cases": [
+    { "name": "expression", "code": "1 + 2", "expect": { "success": true, "value": "3" } },
+    { "name": "statements-then-expression", "code": "x = 21\nx * 2", "expect": { "success": true, "value": "42" } },
+    { "name": "no-result", "code": "x = 1", "expect": { "success": true, "value": null } },
+    { "name": "none-result", "code": "None", "expect": { "success": true, "value": null } },
+    { "name": "bool-result", "code": "1 < 2", "expect": { "success": true, "value": "True" } },
+    { "name": "dict-result-json", "code": "{'a': 1, 'b': [1, 2]}", "expect": { "success": true, "value": "{\"a\": 1, \"b\": [1, 2]}" } },
+    { "name": "local-function", "code": "def twice(n):\n    return n * 2\ntwice(4)", "expect": { "success": true, "value": "8" } },
+    { "name": "local-class", "code": "class P:\n    x = 5\nP().x", "expect": { "success": true, "value": "5" } },
+    { "name": "imports", "code": "import math\nmath.floor(2.7)", "expect": { "success": true, "value": "2" } },
+    { "name": "logs", "code": "print('hello')\n1", "expect": { "success": true, "value": "1", "logsContain": ["hello"] } },
+    { "name": "syntax-error-line", "code": "a = 1\nb = (", "expect": { "success": false, "errorKind": "Compile", "diagnostic": { "file": "snippet.py", "line": 2 } } },
+    { "name": "runtime-exception", "code": "a = 1\nraise ValueError('boom')", "expect": { "success": false, "errorKind": "Runtime", "errorContains": "boom" } },
+    { "name": "runtime-name-error-line", "code": "a = 1\nb = undefined_thing", "expect": { "success": false, "errorKind": "Runtime", "errorContains": "snippet.py\", line 2" } },
+    { "name": "include-folder", "code": "from geo_helpers import sq\nfrom inner.cube_helpers import cube\ncube(3) + sq(2)", "include": ["geo"], "expect": { "success": true, "value": "31" } },
+    { "name": "include-file", "code": "GREETING + '!'", "include": ["prelude.py"], "expect": { "success": true, "value": "hi!" } },
+    { "name": "include-traceback", "code": "explode()", "include": ["broken.py"], "expect": { "success": false, "errorKind": "Runtime", "errorContains": "broken.py" } },
+    { "name": "include-missing", "code": "1", "include": ["missing.py"], "expect": { "success": false, "errorKind": "InvalidRequest" } },
+    { "name": "empty-code", "code": "  ", "expect": { "success": false, "errorKind": "InvalidRequest" } }
+  ]
+}

@@ -1,0 +1,7 @@
+<Project>
+  <!-- Adds the Code-Exec Roslyn adapter source to the consumer's compilation (source-only package). The consumer must
+       reference Microsoft.CodeAnalysis.CSharp 3.8 or newer itself. -->
+  <ItemGroup>
+    <Compile Include="$(MSBuildThisFileDirectory)../src/**/*.cs" Link="CodeExec.Roslyn/%(RecursiveDir)%(Filename)%(Extension)" Visible="false" />
+  </ItemGroup>
+</Project>

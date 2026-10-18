@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="CodeExec.Roslyn/CodeExec.Roslyn.csproj" />
+  <Project Path="CodeExec.Tests/CodeExec.Tests.csproj" />
+  <Project Path="CodeExec/CodeExec.csproj" />
+</Solution>
