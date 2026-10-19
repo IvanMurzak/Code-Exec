@@ -276,19 +276,8 @@ namespace CodeExecTests
         public void LocationResolverMakesInMemoryAssembliesVisible()
         {
             // Build a tiny library on disk, then load it from BYTES: its Location is empty, as with Godot's game assembly.
-            var dir = Path.Combine(Path.GetTempPath(), "codeexec-tests-" + Guid.NewGuid().ToString("N"));
-            Directory.CreateDirectory(dir);
             var name = "InMemoryLib" + Guid.NewGuid().ToString("N").Substring(0, 6);
-            var dll = Path.Combine(dir, name + ".dll");
-            var build = new RoslynCSharpCompiler().Compile(new CompileRequest
-            {
-                Code = "namespace InMemory { public static class Answer { public static int Get() => 99; } }",
-                EntryType = "InMemory.Answer",
-                AssemblyName = name,
-                ReferencePaths = new LoadedAssembliesReferenceProvider().GetReferencePaths(),
-            });
-            Assert.True(build.Success, string.Join(" | ", build.Diagnostics));
-            File.WriteAllBytes(dll, build.Image!);
+            var dll = BuildLibrary(name, "InMemory.Answer", "namespace InMemory { public static class Answer { public static int Get() => 99; } }");
             var loaded = Assembly.Load(File.ReadAllBytes(dll));
             Assert.Equal("", loaded.Location);
 
@@ -299,6 +288,24 @@ namespace CodeExecTests
                 .Execute(new ExecuteRequest { Code = "InMemory.Answer.Get()" });
             Assert.True(seeing.Success, seeing.Error + string.Join(" | ", seeing.Diagnostics));
             Assert.Equal("99", seeing.Value);
+        }
+
+        /// <summary>Compiles <paramref name="code"/> to <c>name.dll</c> in a fresh temp folder and returns its path.</summary>
+        static string BuildLibrary(string name, string type, string code)
+        {
+            var dir = Path.Combine(Path.GetTempPath(), "codeexec-tests-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            var build = new RoslynCSharpCompiler().Compile(new CompileRequest
+            {
+                Code = code,
+                EntryType = type,
+                AssemblyName = name,
+                ReferencePaths = new LoadedAssembliesReferenceProvider().GetReferencePaths(),
+            });
+            Assert.True(build.Success, string.Join(" | ", build.Diagnostics));
+            var dll = Path.Combine(dir, name + ".dll");
+            File.WriteAllBytes(dll, build.Image!);
+            return dll;
         }
 
         [Fact]
@@ -331,7 +338,7 @@ namespace CodeExecTests
         public void CollectibleHostBindsToTheLiveAssemblyNotADiskCopy()
         {
             var name = "LiveGame" + Guid.NewGuid().ToString("N").Substring(0, 6);
-            var dll = BuildLibrary(name, "1.0.0.0", "namespace LiveGame { public static class Score { public static int Value = 1; } }");
+            var dll = BuildLibrary(name, "LiveGame.Score", "namespace LiveGame { public static class Score { public static int Value = 1; } }");
             var gameContext = new System.Runtime.Loader.AssemblyLoadContext("TestGame", isCollectible: true);
             Func<System.Runtime.Loader.AssemblyLoadContext, AssemblyName, Assembly?> diskCopy = (context, requested) =>
                 requested.Name == name ? context.LoadFromAssemblyPath(dll) : null;
@@ -359,8 +366,10 @@ namespace CodeExecTests
         {
             // Two loaded versions of one name; the snippet compiles against 2.0, which loaded FIRST.
             var name = "Versioned" + Guid.NewGuid().ToString("N").Substring(0, 6);
-            var v2 = BuildLibrary(name, "2.0.0.0", "namespace Versioned { public static class Tag { public static string Value = \"v2\"; } }");
-            var v1 = BuildLibrary(name, "1.0.0.0", "namespace Versioned { public static class Tag { public static string Value = \"v1\"; } }");
+            string Version(string v) =>
+                $"[assembly: System.Reflection.AssemblyVersion(\"{v}.0.0.0\")] namespace Versioned {{ public static class Tag {{ public static string Value = \"v{v}\"; }} }}";
+            var v2 = BuildLibrary(name, "Versioned.Tag", Version("2"));
+            var v1 = BuildLibrary(name, "Versioned.Tag", Version("1"));
             var first = new System.Runtime.Loader.AssemblyLoadContext("TestV2", isCollectible: true);
             var second = new System.Runtime.Loader.AssemblyLoadContext("TestV1", isCollectible: true);
             try
@@ -378,23 +387,6 @@ namespace CodeExecTests
                 first.Unload();
                 second.Unload();
             }
-        }
-
-        static string BuildLibrary(string name, string version, string code)
-        {
-            var dir = Path.Combine(Path.GetTempPath(), "codeexec-tests-" + Guid.NewGuid().ToString("N"));
-            Directory.CreateDirectory(dir);
-            var build = new RoslynCSharpCompiler().Compile(new CompileRequest
-            {
-                Code = $"[assembly: System.Reflection.AssemblyVersion(\"{version}\")]\n{code}\nnamespace Entry {{ public static class Main {{ public static void Run() {{ }} }} }}",
-                EntryType = "Entry.Main",
-                AssemblyName = name,
-                ReferencePaths = new LoadedAssembliesReferenceProvider().GetReferencePaths(),
-            });
-            Assert.True(build.Success, string.Join(" | ", build.Diagnostics));
-            var dll = Path.Combine(dir, name + ".dll");
-            File.WriteAllBytes(dll, build.Image!);
-            return dll;
         }
 
         [Fact]

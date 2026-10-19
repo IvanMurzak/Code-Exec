@@ -55,7 +55,7 @@ ExecuteResult result = await runner.ExecuteAsync(new ExecuteRequest { Code = "Ap
 - `Prepare()` compiles and is safe on a background thread; `Run()` / `RunAsync()` invoke on the calling (main) thread.
 - `include` takes files and folders (recursive): the agent's helper "micro-projects", compiled with the snippet.
 - Unknown simple names are imported automatically when exactly one namespace defines them (`autoImported`);
-  ambiguous names are reported, never guessed. The runtime's own `Internal.*` namespaces are never imported.
+  ambiguous names are reported, never guessed. CoreLib's `Internal.*` namespaces are never imported.
 - `ValueConverter` turns the result into something that outlives the snippet (Unity: ReflectorNet JSON).
 - Hosts that load assemblies from memory (Godot's game assembly) pass a `locationResolver` to
   `LoadedAssembliesReferenceProvider`, otherwise snippets cannot see those types. On CoreCLR a snippet binds to the

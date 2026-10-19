@@ -41,9 +41,10 @@ namespace com.IvanMurzak.CodeExec
             Type[] types;
             try { types = assembly.GetExportedTypes(); }
             catch (Exception) { return index; } // assemblies whose dependencies are missing cannot list their types
+            var coreLibrary = assembly == typeof(object).Assembly;
             foreach (var type in types)
             {
-                if (type.IsNested || string.IsNullOrEmpty(type.Namespace) || IsInternalNamespace(type.Namespace!))
+                if (type.IsNested || string.IsNullOrEmpty(type.Namespace) || (coreLibrary && IsInternalNamespace(type.Namespace!)))
                     continue;
                 var name = TypeNames.StripArity(type.Name, out _);
                 if (!index.TryGetValue(name, out var namespaces))
@@ -55,8 +56,8 @@ namespace com.IvanMurzak.CodeExec
         }
 
         /// <summary>
-        /// <c>Internal</c> and <c>Internal.*</c>: public only for the runtime's own use (CoreLib's <c>Internal.Console</c>
-        /// writes past <c>Console.SetOut</c>). Never a guess for a snippet; an explicit using still works.
+        /// CoreLib's <c>Internal</c> / <c>Internal.*</c> types are public only for the runtime's own use
+        /// (<c>Internal.Console</c> writes past <c>Console.SetOut</c>). Never a guess; an explicit using still works.
         /// </summary>
         static bool IsInternalNamespace(string ns) =>
             ns.StartsWith("Internal", StringComparison.Ordinal) && (ns.Length == 8 || ns[8] == '.');

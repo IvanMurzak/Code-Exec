@@ -80,11 +80,9 @@ namespace com.IvanMurzak.CodeExec
         /// </summary>
         static readonly string[] FrameworkFacades = { "System.Runtime", "System.Console", "System.Collections", "System.Linq" };
 
-        static void AddFrameworkFacades(Dictionary<string, string> byName)
+        void AddFrameworkFacades(Dictionary<string, string> byName)
         {
-            string directory;
-            try { directory = Path.GetDirectoryName(typeof(object).Assembly.Location) ?? ""; }
-            catch (NotSupportedException) { return; }
+            var directory = Path.GetDirectoryName(LocationOf(typeof(object).Assembly)) ?? "";
             if (directory.Length == 0)
                 return; // single-file or in-memory runtime: nothing on disk to point at
             foreach (var name in FrameworkFacades)
