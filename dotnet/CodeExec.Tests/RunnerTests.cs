@@ -323,7 +323,7 @@ namespace CodeExecTests
 
 #if NET8_0_OR_GREATER
         [Fact]
-        public void ReferencesIncludeTheFrameworkFacadesEvenBeforeTheyLoad()
+        public void ReferencesIncludeTheFrameworkFacades()
         {
             var files = new LoadedAssembliesReferenceProvider().GetReferencePaths().Select(Path.GetFileName).ToList();
             foreach (var facade in new[] { "System.Runtime.dll", "System.Console.dll", "System.Collections.dll", "System.Linq.dll" })
@@ -386,6 +386,90 @@ namespace CodeExecTests
             {
                 first.Unload();
                 second.Unload();
+            }
+        }
+
+        static string VersionedTag(string version, string value, string ns = "Versioned") =>
+            $"[assembly: System.Reflection.AssemblyVersion(\"{version}.0.0.0\")] namespace {ns} {{ public static class Tag {{ public static string Value = \"{value}\"; }} }}";
+
+        static ExecuteResult RunTag(Func<Assembly, string?> locate, string ns = "Versioned") =>
+            Fixtures.Runner(configure: o => o.References = new LoadedAssembliesReferenceProvider(locate))
+                .Execute(new ExecuteRequest { Code = ns + ".Tag.Value" });
+
+        [Fact]
+        public void CollectibleHostNeverBindsAnOlderVersionByName()
+        {
+            // Only 1.0 is loaded, the snippet compiles against 2.0: the name fallback must not bind 1.0. The 2.0 the
+            // default context then loads stays for the process: its own namespace keeps it out of the other tests' way.
+            var name = "OlderPick" + Guid.NewGuid().ToString("N").Substring(0, 6);
+            var v2 = BuildLibrary(name, "OlderPick.Tag", VersionedTag("2", "v2", "OlderPick"));
+            var v1 = BuildLibrary(name, "OlderPick.Tag", VersionedTag("1", "v1", "OlderPick"));
+            var context = new System.Runtime.Loader.AssemblyLoadContext("TestOld", isCollectible: true);
+            Func<System.Runtime.Loader.AssemblyLoadContext, AssemblyName, Assembly?> compatible = (ctx, requested) =>
+                requested.Name == name ? ctx.LoadFromAssemblyPath(v2) : null;
+            System.Runtime.Loader.AssemblyLoadContext.Default.Resolving += compatible;
+            try
+            {
+                var old = context.LoadFromStream(new MemoryStream(File.ReadAllBytes(v1)));
+                var result = RunTag(a => a == old ? v2 : null, "OlderPick");
+                Assert.True(result.Success, result.Error + string.Join(" | ", result.Diagnostics));
+                Assert.Equal("v2", result.Value);
+            }
+            finally
+            {
+                System.Runtime.Loader.AssemblyLoadContext.Default.Resolving -= compatible;
+                context.Unload();
+            }
+        }
+
+        [Fact]
+        public void CollectibleHostSkipsAnUnloadingCopy()
+        {
+            // A host reload: the old copy's context is unloading but still listed (we hold it), and it loaded LAST.
+            var name = "Versioned" + Guid.NewGuid().ToString("N").Substring(0, 6);
+            var dll = BuildLibrary(name, "Versioned.Tag", VersionedTag("1", "init"));
+            var current = new System.Runtime.Loader.AssemblyLoadContext("TestCurrent", isCollectible: true);
+            var leaving = new System.Runtime.Loader.AssemblyLoadContext("TestLeaving", isCollectible: true);
+            try
+            {
+                var live = current.LoadFromStream(new MemoryStream(File.ReadAllBytes(dll)));
+                var stale = leaving.LoadFromStream(new MemoryStream(File.ReadAllBytes(dll)));
+                live.GetType("Versioned.Tag")!.GetField("Value")!.SetValue(null, "live");
+                stale.GetType("Versioned.Tag")!.GetField("Value")!.SetValue(null, "stale");
+                leaving.Unload();
+
+                var result = RunTag(a => a == live || a == stale ? dll : null);
+                Assert.True(result.Success, result.Error + string.Join(" | ", result.Diagnostics));
+                Assert.Equal("live", result.Value);
+                GC.KeepAlive(stale);
+            }
+            finally
+            {
+                current.Unload();
+            }
+        }
+
+        [Fact]
+        public void CollectibleHostPrefersTheDefaultContextAmongEqualIdentities()
+        {
+            // The Default copy stays loaded for the process: its own namespace keeps it out of the other tests' way.
+            var name = "DefaultPick" + Guid.NewGuid().ToString("N").Substring(0, 6);
+            var dll = BuildLibrary(name, "DefaultPick.Tag", VersionedTag("1", "init", "DefaultPick"));
+            var other = new System.Runtime.Loader.AssemblyLoadContext("TestOther", isCollectible: true);
+            try
+            {
+                var inDefault = System.Runtime.Loader.AssemblyLoadContext.Default.LoadFromAssemblyPath(dll); // unique name: harmless
+                var later = other.LoadFromStream(new MemoryStream(File.ReadAllBytes(dll)));
+                inDefault.GetType("DefaultPick.Tag")!.GetField("Value")!.SetValue(null, "default");
+                later.GetType("DefaultPick.Tag")!.GetField("Value")!.SetValue(null, "other");
+
+                var result = RunTag(a => a == later ? dll : null, "DefaultPick");
+                Assert.True(result.Success, result.Error + string.Join(" | ", result.Diagnostics));
+                Assert.Equal("default", result.Value);
+            }
+            finally
+            {
+                other.Unload();
             }
         }
 

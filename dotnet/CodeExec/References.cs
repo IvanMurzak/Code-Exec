@@ -82,7 +82,8 @@ namespace com.IvanMurzak.CodeExec
 
         void AddFrameworkFacades(Dictionary<string, string> byName)
         {
-            var directory = Path.GetDirectoryName(LocationOf(typeof(object).Assembly)) ?? "";
+            // CoreLib itself, never the host resolver: that one maps in-memory HOST assemblies, not the runtime.
+            var directory = Path.GetDirectoryName(typeof(object).Assembly.Location) ?? "";
             if (directory.Length == 0)
                 return; // single-file or in-memory runtime: nothing on disk to point at
             foreach (var name in FrameworkFacades)
