@@ -1,0 +1,27 @@
+README.md
+  s_5f9a753ce320b5::t_e5e067c583b55f 58
+dotnet/CodeExec.Tests/RunnerTests.cs
+  s_5f9a753ce320b5::t_be400ab72330bc 280,293-310,341,369-372
+dotnet/CodeExec/References.cs
+  s_5f9a753ce320b5::t_d45110460885c4 83,85
+dotnet/CodeExec/Support.cs
+  s_5f9a753ce320b5::t_108de6dbe15bbf 44,47,59-60
+spec/contract.md
+  s_5f9a753ce320b5::t_cba3a3435f86f5 63-64,95
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1569201fedc161df3a11e2f5dba95e9198435b8b",
+  "prompts": {},
+  "sessions": {
+    "s_5f9a753ce320b5": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7ee65e8c-aca3-452e-9397-46e1aceea5e9",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}
