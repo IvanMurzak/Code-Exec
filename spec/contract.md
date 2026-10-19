@@ -60,7 +60,8 @@ parameters' types is invoked; with none fitting, the only method of that name an
 
 ### 3.3. Auto-import
 When compilation fails with unknown names (`CS0246`, `CS0103`), the runtime looks the simple name up among public
-types of the loaded assemblies. **Exactly one** namespace → it is added, compilation is retried, and the namespace is
+types of the loaded assemblies, except the runtime's own `Internal` / `Internal.*` namespaces in CoreLib
+(`Internal.Console` writes past log capture). **Exactly one** namespace → it is added, compilation is retried, and the namespace is
 reported in `autoImported`. Several namespaces → no guess: an extra diagnostic `CE0001` lists the candidates.
 
 ### 3.4. Errors
@@ -68,7 +69,10 @@ Compile errors are reported with `file` = `snippet.cs` (the agent's own line num
 
 ### 3.5. Lifetime
 Each execution is stateless. On CoreCLR the snippet's assembly is loaded into its own collectible
-`AssemblyLoadContext` and unloaded after the result is converted. On Mono (Unity) assemblies cannot be unloaded;
+`AssemblyLoadContext` and unloaded after the result is converted; its references bind to the assemblies the process
+already runs (any load context still alive; same identity first, else the same name at a version no lower than
+referenced; ties: the default context, then the higher version, then the later loaded) before the default context is
+asked, so the snippet sees the host's live statics, never a second copy. On Mono (Unity) assemblies cannot be unloaded;
 identical requests reuse the already-loaded assembly (cache).
 
 ## 4. Python snippet semantics
@@ -89,5 +93,8 @@ Golden fixtures compare `value` as text: C# `ToString()` (`True`, `42`), Python 
 
 ## Changelog
 
+- **v0.2.1** — auto-import skips CoreLib's `Internal.*` namespaces; CoreCLR snippets bind to the already-loaded host
+  assemblies (any load context) and always reference System.Runtime / System.Console / System.Collections /
+  System.Linq, loaded or not, when the runtime directory is on disk.
 - **v0.2** — `returnType` (C#). A snippet that returns nothing compiles to a `void` (or `async Task`) entry method.
 - **v0.1** — first contract.
