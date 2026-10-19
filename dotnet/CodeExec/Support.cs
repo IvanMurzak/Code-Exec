@@ -43,7 +43,7 @@ namespace com.IvanMurzak.CodeExec
             catch (Exception) { return index; } // assemblies whose dependencies are missing cannot list their types
             foreach (var type in types)
             {
-                if (type.IsNested || string.IsNullOrEmpty(type.Namespace))
+                if (type.IsNested || string.IsNullOrEmpty(type.Namespace) || IsInternalNamespace(type.Namespace!))
                     continue;
                 var name = TypeNames.StripArity(type.Name, out _);
                 if (!index.TryGetValue(name, out var namespaces))
@@ -53,6 +53,13 @@ namespace com.IvanMurzak.CodeExec
             }
             return index;
         }
+
+        /// <summary>
+        /// <c>Internal</c> and <c>Internal.*</c>: public only for the runtime's own use (CoreLib's <c>Internal.Console</c>
+        /// writes past <c>Console.SetOut</c>). Never a guess for a snippet; an explicit using still works.
+        /// </summary>
+        static bool IsInternalNamespace(string ns) =>
+            ns.StartsWith("Internal", StringComparison.Ordinal) && (ns.Length == 8 || ns[8] == '.');
     }
 
     static class IncludeResolver

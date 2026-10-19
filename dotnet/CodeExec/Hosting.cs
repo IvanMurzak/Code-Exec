@@ -60,8 +60,11 @@ namespace com.IvanMurzak.CodeExec
 #if NET8_0_OR_GREATER
     /// <summary>
     /// One collectible <see cref="AssemblyLoadContext"/> per execution (CoreCLR: Godot, BRUTAL, plain .NET).
-    /// References resolve against assemblies already loaded in the process: in Godot the game assembly lives in
-    /// Godot's own collectible context, not in the default one.
+    /// A reference binds to the assembly the process ALREADY runs, in whatever context it lives (in Godot the game
+    /// assembly is in Godot's own collectible context), BEFORE the default context is asked: a host's
+    /// <c>AssemblyLoadContext.Default.Resolving</c> handler would otherwise load a second copy from disk, with fresh
+    /// statics and, for engine bindings, uninitialized native interop. Only assemblies loaded nowhere yet fall back to
+    /// the default context.
     /// </summary>
     public sealed class CollectibleAssemblyHost : IAssemblyHost
     {
@@ -69,14 +72,19 @@ namespace com.IvanMurzak.CodeExec
 
         public ILoadedAssembly Load(byte[] image, byte[]? symbols, string name)
         {
-            var context = new AssemblyLoadContext("CodeExec:" + name, isCollectible: true);
-            context.Resolving += ResolveFromLoaded;
+            var context = new SnippetContext("CodeExec:" + name);
             using var imageStream = new MemoryStream(image);
             using var symbolStream = symbols == null ? null : new MemoryStream(symbols);
             return new Loaded(context, context.LoadFromStream(imageStream, symbolStream));
         }
 
-        static Assembly? ResolveFromLoaded(AssemblyLoadContext context, AssemblyName name) => LoadedAssemblies.Find(name.Name);
+        sealed class SnippetContext : AssemblyLoadContext
+        {
+            public SnippetContext(string name) : base(name, isCollectible: true) { }
+
+            // null = loaded nowhere yet: the usual default-context lookup.
+            protected override Assembly? Load(AssemblyName assemblyName) => LoadedAssemblies.Find(assemblyName);
+        }
 
         sealed class Loaded : ILoadedAssembly
         {
@@ -92,10 +100,7 @@ namespace com.IvanMurzak.CodeExec
 
             public void Dispose()
             {
-                if (_context == null)
-                    return;
-                _context.Resolving -= ResolveFromLoaded;
-                _context.Unload();
+                _context?.Unload();
                 _context = null;
             }
         }
@@ -141,6 +146,30 @@ namespace com.IvanMurzak.CodeExec
             }
             return null;
         }
+
+#if NET8_0_OR_GREATER
+        /// <summary>
+        /// The loaded host assembly a reference means: the same full name (identity) first, else the same simple name;
+        /// among equals the newest, since a host reload can briefly leave the old copy listed.
+        /// </summary>
+        public static Assembly? Find(AssemblyName reference)
+        {
+            var simpleName = reference.Name;
+            if (simpleName == null)
+                return null;
+            var fullName = reference.FullName;
+            Assembly? sameIdentity = null, sameName = null;
+            foreach (var assembly in Host())
+            {
+                if (!string.Equals(SimpleName(assembly), simpleName, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                sameName = assembly;
+                if (string.Equals(assembly.FullName, fullName, StringComparison.OrdinalIgnoreCase))
+                    sameIdentity = assembly;
+            }
+            return sameIdentity ?? sameName;
+        }
+#endif
 
         /// <summary>The simple name from the runtime-cached <see cref="Assembly.FullName"/> (no AssemblyName allocation).</summary>
         public static string SimpleName(Assembly assembly)

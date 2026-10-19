@@ -38,8 +38,8 @@ Every host already has its own Roslyn constraints (Unity pins 4.8 because of `Sy
 ## C# in two lines
 
 ```xml
-<PackageReference Include="com.IvanMurzak.CodeExec" Version="0.2.0" />
-<PackageReference Include="com.IvanMurzak.CodeExec.Roslyn" Version="0.2.0" />
+<PackageReference Include="com.IvanMurzak.CodeExec" Version="0.2.1" />
+<PackageReference Include="com.IvanMurzak.CodeExec.Roslyn" Version="0.2.1" />
 <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.8.0" />  <!-- your choice, 3.8+ -->
 ```
 
@@ -55,10 +55,12 @@ ExecuteResult result = await runner.ExecuteAsync(new ExecuteRequest { Code = "Ap
 - `Prepare()` compiles and is safe on a background thread; `Run()` / `RunAsync()` invoke on the calling (main) thread.
 - `include` takes files and folders (recursive): the agent's helper "micro-projects", compiled with the snippet.
 - Unknown simple names are imported automatically when exactly one namespace defines them (`autoImported`);
-  ambiguous names are reported, never guessed.
+  ambiguous names are reported, never guessed. The runtime's own `Internal.*` namespaces are never imported.
 - `ValueConverter` turns the result into something that outlives the snippet (Unity: ReflectorNet JSON).
 - Hosts that load assemblies from memory (Godot's game assembly) pass a `locationResolver` to
-  `LoadedAssembliesReferenceProvider`, otherwise snippets cannot see those types.
+  `LoadedAssembliesReferenceProvider`, otherwise snippets cannot see those types. On CoreCLR a snippet binds to the
+  copy the process already runs (any load context) before the default context is asked, so a host's
+  `AssemblyLoadContext.Default.Resolving` handler cannot hand it a second copy.
 
 ## Python
 

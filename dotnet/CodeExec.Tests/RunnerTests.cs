@@ -301,7 +301,102 @@ namespace CodeExecTests
             Assert.Equal("99", seeing.Value);
         }
 
+        [Fact]
+        public void AutoImportNeverGuessesARuntimeInternalNamespace()
+        {
+            // CoreLib (CoreCLR) has a public Internal.Console that writes past Console.SetOut: only System.Console counts.
+            Assert.Equal(new[] { "System" }, TypeIndex.FindNamespaces(new[] { "Console" })["Console"]);
+
+            var result = Fixtures.Runner(configure: o => o.DefaultUsings = Array.Empty<string>())
+                .Execute(new ExecuteRequest { Code = "Console.WriteLine(\"captured\");\n1" });
+            Assert.True(result.Success, result.Error + string.Join(" | ", result.Diagnostics));
+            Assert.Equal(new[] { "System" }, result.AutoImported);
+            Assert.Contains(result.Logs, l => l.Message == "captured");
+        }
+
 #if NET8_0_OR_GREATER
+        [Fact]
+        public void ReferencesIncludeTheFrameworkFacadesEvenBeforeTheyLoad()
+        {
+            var files = new LoadedAssembliesReferenceProvider().GetReferencePaths().Select(Path.GetFileName).ToList();
+            foreach (var facade in new[] { "System.Runtime.dll", "System.Console.dll", "System.Collections.dll", "System.Linq.dll" })
+                Assert.Contains(facade, files, StringComparer.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
+        /// Godot's situation: the game assembly lives in its own collectible context, loaded from memory, while a host's
+        /// default-context resolver answers a miss with a fresh copy from disk. The snippet must see the LIVE assembly.
+        /// </summary>
+        [Fact]
+        public void CollectibleHostBindsToTheLiveAssemblyNotADiskCopy()
+        {
+            var name = "LiveGame" + Guid.NewGuid().ToString("N").Substring(0, 6);
+            var dll = BuildLibrary(name, "1.0.0.0", "namespace LiveGame { public static class Score { public static int Value = 1; } }");
+            var gameContext = new System.Runtime.Loader.AssemblyLoadContext("TestGame", isCollectible: true);
+            Func<System.Runtime.Loader.AssemblyLoadContext, AssemblyName, Assembly?> diskCopy = (context, requested) =>
+                requested.Name == name ? context.LoadFromAssemblyPath(dll) : null;
+            System.Runtime.Loader.AssemblyLoadContext.Default.Resolving += diskCopy;
+            try
+            {
+                var live = gameContext.LoadFromStream(new MemoryStream(File.ReadAllBytes(dll))); // like Godot: no Location
+                live.GetType("LiveGame.Score")!.GetField("Value")!.SetValue(null, 5);
+
+                var result = Fixtures.Runner(configure: o => o.References = new LoadedAssembliesReferenceProvider(a => a == live ? dll : null))
+                    .Execute(new ExecuteRequest { Code = "LiveGame.Score.Value" });
+                Assert.True(result.Success, result.Error + string.Join(" | ", result.Diagnostics));
+                Assert.Equal("5", result.Value);
+                Assert.Single(AppDomain.CurrentDomain.GetAssemblies(), a => a.GetName().Name == name);
+            }
+            finally
+            {
+                System.Runtime.Loader.AssemblyLoadContext.Default.Resolving -= diskCopy;
+                gameContext.Unload();
+            }
+        }
+
+        [Fact]
+        public void CollectibleHostBindsToTheReferencedIdentityFirst()
+        {
+            // Two loaded versions of one name; the snippet compiles against 2.0, which loaded FIRST.
+            var name = "Versioned" + Guid.NewGuid().ToString("N").Substring(0, 6);
+            var v2 = BuildLibrary(name, "2.0.0.0", "namespace Versioned { public static class Tag { public static string Value = \"v2\"; } }");
+            var v1 = BuildLibrary(name, "1.0.0.0", "namespace Versioned { public static class Tag { public static string Value = \"v1\"; } }");
+            var first = new System.Runtime.Loader.AssemblyLoadContext("TestV2", isCollectible: true);
+            var second = new System.Runtime.Loader.AssemblyLoadContext("TestV1", isCollectible: true);
+            try
+            {
+                var loadedV2 = first.LoadFromStream(new MemoryStream(File.ReadAllBytes(v2)));
+                second.LoadFromStream(new MemoryStream(File.ReadAllBytes(v1)));
+
+                var result = Fixtures.Runner(configure: o => o.References = new LoadedAssembliesReferenceProvider(a => a == loadedV2 ? v2 : null))
+                    .Execute(new ExecuteRequest { Code = "Versioned.Tag.Value" });
+                Assert.True(result.Success, result.Error + string.Join(" | ", result.Diagnostics));
+                Assert.Equal("v2", result.Value);
+            }
+            finally
+            {
+                first.Unload();
+                second.Unload();
+            }
+        }
+
+        static string BuildLibrary(string name, string version, string code)
+        {
+            var dir = Path.Combine(Path.GetTempPath(), "codeexec-tests-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            var build = new RoslynCSharpCompiler().Compile(new CompileRequest
+            {
+                Code = $"[assembly: System.Reflection.AssemblyVersion(\"{version}\")]\n{code}\nnamespace Entry {{ public static class Main {{ public static void Run() {{ }} }} }}",
+                EntryType = "Entry.Main",
+                AssemblyName = name,
+                ReferencePaths = new LoadedAssembliesReferenceProvider().GetReferencePaths(),
+            });
+            Assert.True(build.Success, string.Join(" | ", build.Diagnostics));
+            var dll = Path.Combine(dir, name + ".dll");
+            File.WriteAllBytes(dll, build.Image!);
+            return dll;
+        }
+
         [Fact]
         public void CollectibleContextsAreUnloaded()
         {
