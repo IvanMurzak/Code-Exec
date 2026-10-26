@@ -119,8 +119,9 @@ namespace com.IvanMurzak.CodeExec
 
     /// <summary>
     /// Whether a snippet assembly keeps state between runs if it is reused: a static field (an auto-property's or an
-    /// event's backing field included) declared by one of the agent's own types. The compiler's own types (lambda caches,
-    /// array-initializer data) are stateless for this purpose.
+    /// event's backing field included) declared by one of the agent's own types, unless it is <c>readonly</c> and of an
+    /// immutable type (spec §3.5): a lookup table or a value computed once is not state. The compiler's own types (lambda
+    /// caches, array-initializer data) are stateless for this purpose.
     /// </summary>
     static class StaticState
     {
@@ -133,7 +134,7 @@ namespace com.IvanMurzak.CodeExec
                 {
                     if (type.IsDefined(typeof(CompilerGeneratedAttribute), false))
                         continue;
-                    if (type.GetFields(flags).Any(f => !f.IsLiteral))
+                    if (type.GetFields(flags).Any(f => !f.IsLiteral && !(f.IsInitOnly && IsImmutable(f.FieldType))))
                         return true;
                 }
                 return false;
@@ -142,6 +143,39 @@ namespace com.IvanMurzak.CodeExec
             {
                 return true;
             }
+        }
+
+        static readonly HashSet<Type> ImmutableValues = new HashSet<Type>
+        {
+            typeof(string), typeof(decimal), typeof(DateTime), typeof(DateTimeOffset), typeof(TimeSpan), typeof(Guid),
+        };
+
+        // Read-only views: their contents cannot change through the declared type (a cast back to a mutable one can).
+        static readonly HashSet<string> ReadOnlyViews = new HashSet<string>
+        {
+            "System.Collections.Generic.IReadOnlyCollection`1", "System.Collections.Generic.IReadOnlyList`1",
+            "System.Collections.Generic.IReadOnlyDictionary`2", "System.Collections.Generic.IReadOnlySet`1",
+            "System.Collections.ObjectModel.ReadOnlyCollection`1", "System.Collections.ObjectModel.ReadOnlyDictionary`2",
+        };
+
+        /// <summary>
+        /// Strings, primitives, enums, a few immutable BCL values (decimal, DateTime, DateTimeOffset, TimeSpan, Guid, and
+        /// nullables of all these), and read-only / immutable collections (by declared type) of immutable elements. Arrays
+        /// are mutable: <c>static readonly int[]</c> stays state.
+        /// </summary>
+        static bool IsImmutable(Type type)
+        {
+            if (type.IsPrimitive || type.IsEnum || ImmutableValues.Contains(type))
+                return true;
+            if (!type.IsGenericType)
+                return false;
+            var definition = type.GetGenericTypeDefinition();
+            if (definition == typeof(Nullable<>))
+                return IsImmutable(type.GetGenericArguments()[0]);
+            var immutable = definition.Namespace == "System.Collections.Immutable"
+                && (definition.Name.StartsWith("Immutable", StringComparison.Ordinal) || definition.Name.StartsWith("IImmutable", StringComparison.Ordinal));
+            return (immutable || ReadOnlyViews.Contains(definition.FullName ?? ""))
+                && type.GetGenericArguments().All(IsImmutable);
         }
     }
 

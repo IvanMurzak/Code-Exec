@@ -522,6 +522,16 @@ namespace CodeExecTests
         [InlineData("Func<int, int> twice = x => x * 2;\nnew[] { 1, 2 }.Select(twice).Sum()", "6", false)] // lambda caches only
         [InlineData("var seen = new List<int>();\nFunc<int, int> twice = x => x * 2;\nseen.Add(twice(1));\nnew[] { 1, 2 }.Sum() + seen.Count", "4", false)]
         [InlineData("const int K = 2;\nnew[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 }.Length * K", "20", false)] // array data only
+        // readonly + immutable type: a lookup table, not state (spec §3.5)
+        [InlineData("static readonly string greeting = \"hi\";\ngreeting.Length", "2", false)]
+        [InlineData("public enum Color { Red, Green }\npublic static class D { public static readonly Color Default = Color.Green; public static readonly int? Max = 5; public static readonly TimeSpan T = TimeSpan.FromSeconds(1); }\n(int)D.Default + D.Max.Value + (int)D.T.TotalSeconds", "7", false)]
+        [InlineData("public static class G { public static int N { get; } = 3; }\nG.N", "3", false)]
+        [InlineData("public static class M { public static readonly IReadOnlyDictionary<string, int> Map = new Dictionary<string, int> { [\"a\"] = 1, [\"b\"] = 2 }; }\nM.Map[\"b\"]", "2", false)]
+        [InlineData("public static class I { public static readonly System.Collections.Immutable.ImmutableArray<string> A = System.Collections.Immutable.ImmutableArray.Create(\"x\", \"y\"); }\nI.A.Length", "2", false)]
+        // readonly but mutable: arrays, mutable elements, or a mutable field next to an immutable one
+        [InlineData("public static class A { public static readonly int[] C = new int[1]; }\n++A.C[0]", "1", true)]
+        [InlineData("public static class R { public static readonly IReadOnlyList<List<int>> L = new[] { new List<int>() }; }\nR.L[0].Add(1);\nR.L[0].Count", "1", true)]
+        [InlineData("public static class X { public static readonly string S = \"s\"; public static int N; }\n++X.N", "1", true)]
         public void StatefulSnippetsNeverSeeAnotherRunsStatics(string code, string expected, bool stateful)
         {
             var runner = Fixtures.Runner(configure: o => o.Host = new DefaultAssemblyHost());

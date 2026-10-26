@@ -104,6 +104,14 @@ asked, so the snippet sees the host's live statics, never a second copy. On Mono
 identical requests reuse the already-loaded assembly (cache) — unless the snippet (or an include) declares static state
 of its own (a static field, auto-property or field-like event in one of its types): then every run loads a fresh copy,
 so no run ever sees another run's statics. Such a snippet costs one assembly per run until the host's domain reloads.
+A `static readonly` field (or a getter-only static auto-property) is **not** state when its declared type is immutable:
+`string`, a primitive, an enum, `decimal`, `DateTime`, `DateTimeOffset`, `TimeSpan`, `Guid`, a nullable of one of
+these, or a read-only / immutable collection of immutable elements (`IReadOnlyCollection<T>`, `IReadOnlyList<T>`,
+`IReadOnlyDictionary<K,V>`, `IReadOnlySet<T>`, `ReadOnlyCollection<T>`, `ReadOnlyDictionary<K,V>`,
+`System.Collections.Immutable.*`). So a lookup table like `static readonly IReadOnlyDictionary<string, int> Map` keeps
+the snippet cached. Arrays are mutable (`static readonly int[]` is state). Two consequences of reuse on Mono, by design:
+such a field's initializer runs once per loaded copy (`static readonly DateTime Started = DateTime.Now` keeps its first
+value), and a cast from the declared read-only type back to a mutable one is not detected.
 
 ## 4. Python snippet semantics
 
@@ -150,6 +158,9 @@ Lengths are in characters: UTF-16 code units in C#, code points in Python. A lim
 
 ## Changelog
 
+- **v0.3.1** — C#: a `static readonly` field of an immutable type (§3.5) no longer counts as static state, so a snippet
+  or include with a lookup table is reused on Mono instead of loading one assembly per run. The Python runtime is
+  unchanged.
 - **v0.3** — output limits (§6): request fields `maxValueChars`, `maxLogChars`, `maxLogLineChars`, `maxErrorChars`
   (defaults 20000 / 20000 / 2000 / 20000, the caps Unreal-MCP and Godot-MCP applied on their side) and response field
   `truncated`; long tracebacks keep their first and last 10 frames; at most 20 diagnostics. Includes stay inside the
