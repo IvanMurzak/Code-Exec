@@ -58,8 +58,8 @@ ExecuteResult result = await runner.ExecuteAsync(new ExecuteRequest { Code = "Ap
   ambiguous names are reported, never guessed. CoreLib's `Internal.*` namespaces are never imported.
 - `ValueConverter` turns the result into something that outlives the snippet (Unity: ReflectorNet JSON).
 - Output is limited before it reaches the agent ([§6](spec/contract.md#6-output-limits)): a text value, the logs (first
-  and last lines kept) and the error, 20k characters each by default (`MaxValueChars`, `MaxLogChars`, `MaxLogLineChars`,
-  `MaxErrorChars` on the request; 0 = no limit). Includes stay inside `IncludeRoot` unless `AllowIncludeOutsideRoot`.
+  and last lines kept, 2k per line) and the error, 20k characters each by default (`MaxValueChars`, `MaxLogChars`,
+  `MaxLogLineChars`, `MaxErrorChars` on the request; 0 = no limit). Includes stay inside `IncludeRoot` unless `AllowIncludeOutsideRoot`.
 - Hosts that load assemblies from memory (Godot's game assembly) pass a `locationResolver` to
   `LoadedAssembliesReferenceProvider`, otherwise snippets cannot see those types. On CoreCLR a snippet binds to the
   copy the process already runs (any load context) before the default context is asked, so a host's

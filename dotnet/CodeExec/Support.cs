@@ -72,14 +72,16 @@ namespace com.IvanMurzak.CodeExec
         public static List<SourceFile> Read(IReadOnlyList<string> include, string root, bool allowOutsideRoot)
         {
             var files = new List<SourceFile>();
-            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var prefix = Path.GetFullPath(root).TrimEnd('\\', '/') + Path.DirectorySeparatorChar;
+            if (include.Count == 0)
+                return files; // the root is not even needed (a host may leave it empty)
+            var seen = new HashSet<string>(PathComparer);
+            var prefix = WithSeparator(Path.GetFullPath(root));
             foreach (var entry in include)
             {
                 if (string.IsNullOrWhiteSpace(entry))
                     throw new ArgumentException("include entry is empty");
-                var full = Path.GetFullPath(Path.IsPathRooted(entry) ? entry : Path.Combine(root, entry)).TrimEnd('\\', '/');
-                if (!allowOutsideRoot && !IsUnder(prefix, full + Path.DirectorySeparatorChar)) // the root itself counts
+                var full = Path.GetFullPath(Path.IsPathRooted(entry) ? entry : Path.Combine(root, entry));
+                if (!allowOutsideRoot && !IsUnder(prefix, WithSeparator(full))) // the root itself counts
                     throw new ArgumentException("include is outside the include root: " + entry);
                 IEnumerable<string> paths;
                 if (Directory.Exists(full))
@@ -101,7 +103,16 @@ namespace com.IvanMurzak.CodeExec
             return files;
         }
 
-        static bool IsUnder(string prefix, string path) => path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
+        // Windows paths are case-insensitive; elsewhere a differently cased path may be another folder.
+        static readonly StringComparison PathComparison = Path.DirectorySeparatorChar == '\\' ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        static readonly StringComparer PathComparer = Path.DirectorySeparatorChar == '\\' ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+
+        static string WithSeparator(string path) =>
+            path.EndsWith(Path.DirectorySeparatorChar.ToString(), StringComparison.Ordinal) || path.EndsWith(Path.AltDirectorySeparatorChar.ToString(), StringComparison.Ordinal)
+                ? path
+                : path + Path.DirectorySeparatorChar;
+
+        static bool IsUnder(string prefix, string path) => path.StartsWith(prefix, PathComparison);
 
         static string Relative(string prefix, string path) => (IsUnder(prefix, path) ? path.Substring(prefix.Length) : path).Replace('\\', '/');
     }
@@ -116,19 +127,21 @@ namespace com.IvanMurzak.CodeExec
         public static bool Has(Assembly assembly)
         {
             const BindingFlags flags = BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
-            Type?[] types;
-            try { types = assembly.GetTypes(); }
-            catch (ReflectionTypeLoadException e) { types = e.Types; }
-            foreach (var type in types)
+            try
             {
-                if (type == null)
-                    return true; // cannot tell: be safe, load fresh copies
-                if (type.IsDefined(typeof(CompilerGeneratedAttribute), false))
-                    continue;
-                if (type.GetFields(flags).Any(f => !f.IsLiteral))
-                    return true;
+                foreach (var type in assembly.GetTypes())
+                {
+                    if (type.IsDefined(typeof(CompilerGeneratedAttribute), false))
+                        continue;
+                    if (type.GetFields(flags).Any(f => !f.IsLiteral))
+                        return true;
+                }
+                return false;
             }
-            return false;
+            catch (Exception) // a type or attribute that cannot load: cannot tell, so be safe and load fresh copies
+            {
+                return true;
+            }
         }
     }
 

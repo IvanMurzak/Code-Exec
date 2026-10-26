@@ -153,8 +153,14 @@ namespace com.IvanMurzak.CodeExec
             if (request == null)
                 throw new ArgumentNullException(nameof(request));
             var stopwatch = Stopwatch.StartNew();
-            PreparedSnippet Fail(ErrorKind kind, string error) =>
-                new PreparedSnippet(request, ExecuteResult.Fail(kind, error), null, false, stopwatch.ElapsedMilliseconds);
+            PreparedSnippet Fail(ErrorKind kind, string error)
+            {
+                // An early error can quote the request (an include path): the error limit applies to it too.
+                var failure = ExecuteResult.Fail(kind, OutputLimits.Clip(error, Math.Max(request.MaxErrorChars, 0), OutputLimits.ErrorHint));
+                if (!ReferenceEquals(failure.Error, error))
+                    failure.Truncated = new[] { "error" };
+                return new PreparedSnippet(request, failure, null, false, stopwatch.ElapsedMilliseconds);
+            }
 
             if (string.IsNullOrWhiteSpace(request.Code))
                 return Fail(ErrorKind.InvalidRequest, "code is empty");
@@ -170,7 +176,8 @@ namespace com.IvanMurzak.CodeExec
                 parameters = request.Parameters.Select(p => new ParameterDeclaration(p.Name, TypeNames.ToCSharp(p.Type))).ToList();
                 includes = IncludeResolver.Read(request.Include, _options.IncludeRoot, _options.AllowIncludeOutsideRoot);
             }
-            catch (Exception e) when (e is IOException || e is ArgumentException || e is UnauthorizedAccessException)
+            catch (Exception e) when (e is IOException || e is ArgumentException || e is UnauthorizedAccessException
+                || e is NotSupportedException || e is System.Security.SecurityException) // bad include paths (`a.cs:zz` on .NET Framework)
             {
                 return Fail(ErrorKind.InvalidRequest, e.Message);
             }
@@ -233,7 +240,7 @@ namespace com.IvanMurzak.CodeExec
             if (compiled.Image == null)
             {
                 var failure = ExecuteResult.Fail(ErrorKind.Compile, "Compilation failed");
-                failure.Diagnostics = OutputLimits.Diagnostics(compiled.Diagnostics.Concat(ambiguous));
+                failure.Diagnostics = OutputLimits.Diagnostics(ambiguous.Concat(compiled.Diagnostics)); // the actionable CE0001 first
                 failure.AutoImported = autoImported;
                 failure.CompileMs = stopwatch.ElapsedMilliseconds;
                 return new PreparedSnippet(request, failure, null, false, failure.CompileMs);
@@ -657,12 +664,12 @@ namespace com.IvanMurzak.CodeExec
                 // Output limits (spec §6): a text value, the logs and the error, in the order `truncated` lists them.
                 var request = _prepared.Request;
                 var truncated = new List<string>();
-                if (value is string text && !ReferenceEquals(value = OutputLimits.Clip(text, request.MaxValueChars, "return a slice or a summary"), text))
+                if (value is string text && !ReferenceEquals(value = OutputLimits.Clip(text, request.MaxValueChars, OutputLimits.ValueHint), text))
                     truncated.Add("value");
                 var logs = _logs.Entries(out var logsTruncated);
                 if (logsTruncated)
                     truncated.Add("logs");
-                var error = _error == null ? null : OutputLimits.Clip(_error, request.MaxErrorChars, "raise a shorter message");
+                var error = _error == null ? null : OutputLimits.Clip(_error, request.MaxErrorChars, OutputLimits.ErrorHint);
                 if (!ReferenceEquals(error, _error))
                     truncated.Add("error");
                 return new ExecuteResult

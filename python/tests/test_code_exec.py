@@ -129,6 +129,13 @@ class BehaviourTests(unittest.TestCase):
         self.assertIn({"level": "info", "message": "partial"}, result["logs"])
 
 
+class _Unprintable:
+    def __str__(self):
+        raise RuntimeError("no str")
+
+    __repr__ = __str__
+
+
 class RobustnessTests(unittest.TestCase):
     """A snippet must never take the host down or flood it (spec sections 4 and 6)."""
 
@@ -269,6 +276,72 @@ class RobustnessTests(unittest.TestCase):
         self.write(os.path.join("inside", "h.py"), b"Y = 2\n")
         self.assertEqual("2", code_exec.run("Y", include=[os.path.join(inside, "h.py")], include_root=inside)["value"])
         self.assertTrue(code_exec.run("1", include=["."], include_root=inside)["success"])
+
+    def test_broken_interpreter_state_is_restored_and_reported(self):
+        before_path, before_limit = list(sys.path), sys.getrecursionlimit()
+        for code in ("import sys\ndel sys.path\n1", "import sys\nsys.path = None\n1",
+                     "import sys, inspect\nsys.setrecursionlimit(len(inspect.stack()) + 8)\nraise ValueError('low')"):
+            with self.subTest(code):
+                result = code_exec.run(code)  # must answer, not raise
+                self.assertIn(result["errorKind"], ("None", "Runtime"), result)
+                self.assertEqual(before_path, sys.path)
+                self.assertEqual(before_limit, sys.getrecursionlimit())
+
+    def test_non_text_coding_declaration_is_an_invalid_request(self):
+        self.write("rot.py", b"# coding: rot13\nK = 1\n")
+        self.assertEqual("InvalidRequest", code_exec.run("K", include=["rot.py"], include_root=self.folder)["errorKind"])
+
+    def test_json_entry_points_never_raise(self):
+        self.assertEqual("InvalidRequest", json.loads(code_exec.run_json("[" * 100000))["errorKind"])
+        self.assertEqual("InvalidRequest", json.loads(code_exec.run_b64(None))["errorKind"])
+        for converted in ({(1, 2): 3}, None):
+            runner.set_value_converter(lambda v, converted=converted: converted if converted is not None else _Unprintable())
+            try:
+                response = json.loads(code_exec.run_json(json.dumps({"code": "1"})))
+                self.assertTrue(response["success"], response)
+            finally:
+                runner.set_value_converter(None)
+
+    def test_falsy_wrong_json_types_are_invalid_requests(self):
+        for request in ({"include": ""}, {"include": {}}, {"include": False}, {"imports": {}}, {"imports": 0},
+                        {"includeOutsideRoot": "true"}, {"includeRoot": 0}):
+            request["code"] = "1"
+            with self.subTest(request):
+                self.assertEqual("InvalidRequest", json.loads(code_exec.run_json(json.dumps(request)))["errorKind"])
+
+    def test_host_modules_under_an_include_folder_stay_loaded(self):
+        self.write("hostmod_ce.py", b"STATE = []\n")
+        sys.path.insert(0, self.folder)
+        try:
+            import hostmod_ce
+            code_exec.run("1", include=["."], include_root=self.folder)
+            self.assertIs(hostmod_ce, sys.modules.get("hostmod_ce"))
+        finally:
+            sys.path.remove(self.folder)
+            sys.modules.pop("hostmod_ce", None)
+
+    def test_traceback_shows_the_agents_own_lines(self):
+        cwd = os.getcwd()
+        self.write("snippet.py", b"UNRELATED_LINE_1\nUNRELATED_LINE_2\n")
+        os.chdir(self.folder)  # a stray snippet.py where linecache would look
+        try:
+            error = code_exec.run("import sys\nsys.tracebacklimit = 0\nraise ValueError('mine')")["error"]
+        finally:
+            os.chdir(cwd)
+        self.assertIn('snippet.py", line 3', error)
+        self.assertIn("raise ValueError('mine')", error)
+        self.assertNotIn("UNRELATED", error)
+
+    @unittest.skipUnless(os.name == "nt", "case-insensitive paths")
+    def test_same_include_in_another_case_runs_once(self):
+        self.write("count.py", b"import builtins\nbuiltins._ce_count = getattr(builtins, '_ce_count', 0) + 1\n")
+        try:
+            code_exec.run("1", include=["count.py", "COUNT.py"], include_root=self.folder)
+            import builtins
+            self.assertEqual(1, builtins._ce_count)
+        finally:
+            import builtins
+            builtins.__dict__.pop("_ce_count", None)
 
     def test_include_file_must_be_python(self):
         self.write("data.json", b"{}")

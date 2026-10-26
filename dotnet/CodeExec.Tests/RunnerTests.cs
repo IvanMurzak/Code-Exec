@@ -652,6 +652,39 @@ namespace CodeExecTests
         }
 
         [Fact]
+        public void EmptyIncludeRootIsFineWithoutIncludes()
+        {
+            var result = Fixtures.Runner(configure: o => o.IncludeRoot = "").Execute(new ExecuteRequest { Code = "1" });
+            Assert.True(result.Success, result.Error);
+        }
+
+        sealed class NullMessageCapture : ILogCapture
+        {
+            public IDisposable Begin(Action<LogEntry> sink)
+            {
+                sink(new LogEntry("info", null!));
+                return new System.IO.StringWriter(); // anything disposable
+            }
+        }
+
+        [Fact]
+        public void HostLogEntryWithoutAMessageIsKept()
+        {
+            var result = Fixtures.Runner(configure: o => o.LogCaptures.Add(new NullMessageCapture())).Execute(new ExecuteRequest { Code = "1" });
+            Assert.True(result.Success, result.Error);
+            Assert.Contains(result.Logs, l => l.Message == "");
+        }
+
+        [Fact]
+        public void EarlyErrorsAreClippedToo()
+        {
+            var result = Fixtures.Runner().Execute(new ExecuteRequest { Code = "1", Include = new[] { new string('d', 300) + ".cs" }, MaxErrorChars = 30 });
+            Assert.Equal(ErrorKind.InvalidRequest, result.ErrorKind);
+            Assert.EndsWith("characters shown; raise a shorter message]", result.Error);
+            Assert.Equal(new[] { "error" }, result.Truncated);
+        }
+
+        [Fact]
         public void NegativeLimitIsAnInvalidRequest()
         {
             var result = Fixtures.Runner().Execute(new ExecuteRequest { Code = "1", MaxErrorChars = -5 });

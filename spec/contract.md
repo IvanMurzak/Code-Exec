@@ -111,9 +111,10 @@ so no run ever sees another run's statics. Such a snippet costs one assembly per
 - `include` folders are put on `sys.path` for the run; modules loaded from them are dropped from `sys.modules`
   before each run, so edited helpers are picked up. `include` files are executed into the snippet's namespace first.
 - `print` / `sys.stdout` / `sys.stderr` go to `logs`.
-- Each run gets a fresh namespace; `sys.path` and the working directory are restored afterwards.
+- Each run gets a fresh namespace; `sys.path`, the working directory and the recursion limit are restored afterwards,
+  and the modules the run imported from include folders are dropped (host modules imported before stay).
 - `include` files are read as Python reads source files: UTF-8, or the encoding named by a UTF-8 BOM or a PEP 263
-  coding declaration. A file that does not decode is `InvalidRequest`.
+  coding declaration. A file that does not decode (or names an unknown or non-text encoding) is `InvalidRequest`.
 - `SyntaxError` → `Compile` with the snippet's line/column. Any exception → `Runtime`, **including every
   `BaseException`** (`SystemExit`, `KeyboardInterrupt`, `GeneratorExit`, custom subclasses): a snippet never stops or
   interrupts the host. The traceback keeps only frames from `snippet.py` and the includes, then follows the chain (at
@@ -143,7 +144,8 @@ Lengths are in characters: UTF-16 code units in C#, code points in Python. A lim
   of last entries that keeps the total within `maxLogChars`, and puts between them one entry
   `{ "level": "warning", "message": "... K log line(s) left out (output over maxLogChars characters): print less, or
   return a summary" }` (with the numbers filled in; this entry costs nothing). Runtimes apply this as lines arrive, so
-  a snippet that prints without end does not grow the host's memory either.
+  a snippet that prints line after line without end does not grow the host's memory either (one unfinished line is
+  held until it ends).
 - `truncated` lists `value`, `logs` and `error` when their limit changed them (a clipped log line counts as `logs`).
 
 ## Changelog

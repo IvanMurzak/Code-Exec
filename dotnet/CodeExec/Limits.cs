@@ -25,6 +25,9 @@ namespace com.IvanMurzak.CodeExec
         /// <summary>Compile diagnostics returned at most; one more entry says how many were left out.</summary>
         public const int MaxDiagnostics = 20;
 
+        internal const string ValueHint = "return a slice or a summary";
+        internal const string ErrorHint = "raise a shorter message";
+
         /// <summary>
         /// The first <paramref name="limit"/> characters plus <c>... [truncated: N of M characters shown; hint]</c>;
         /// never splits a surrogate pair. <paramref name="limit"/> 0 = no limit.
@@ -76,11 +79,12 @@ namespace com.IvanMurzak.CodeExec
 
         public void Add(LogEntry entry)
         {
-            var message = entry.Message ?? "";
-            var clipped = OutputLimits.Clip(message, _maxLine, "print less");
+            if (entry.Message == null) // a host hook's empty message
+                entry = new LogEntry(entry.Level, "");
+            var clipped = OutputLimits.Clip(entry.Message, _maxLine, "print less");
             lock (_head)
             {
-                if (!ReferenceEquals(clipped, message))
+                if (!ReferenceEquals(clipped, entry.Message))
                 {
                     _clipped = true;
                     entry = new LogEntry(entry.Level, clipped);

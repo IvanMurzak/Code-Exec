@@ -6,6 +6,7 @@ import builtins
 import collections
 import io
 import json
+import linecache
 import os
 import sys
 import time
@@ -52,7 +53,11 @@ def run(code, include=(), include_root=None, imports=(), max_value_chars=MAX_VAL
     if any(isinstance(limit, bool) or not isinstance(limit, int) or limit < 0 for limit in limits):
         return _fail(result, "InvalidRequest", "output limits must be integers >= 0 (0 = no limit)")
     logs = _Logs(max_log_chars, max_log_line_chars)
-    _execute(result, logs, code, include, include_root, imports, include_outside_root)
+    try:
+        _execute(result, logs, code, include, include_root, imports, include_outside_root)
+    except BaseException as error:  # the runner itself failed (a snippet wrecked the interpreter state): still answer
+        result["success"], result["value"] = False, None
+        _fail(result, "Runtime", "%s: %s (while running the snippet)" % (type(error).__name__, _message(error)))
 
     result["logs"] = logs.entries()
     value, error = result["value"], result["error"]
@@ -109,9 +114,7 @@ def _execute(result, logs, code, include, include_root, imports, include_outside
     scope = {"__name__": "__code_exec__", "__builtins__": builtins}
     out, err = _LogStream(logs, "info"), _LogStream(logs, "error")
     prefixes = [_prefix(folder) for folder in folders]
-    saved_path = list(sys.path)
-    saved_bytecode = sys.dont_write_bytecode
-    saved_cwd = os.getcwd()
+    saved = _HostState(code, sources)
     try:
         sys.path[:0] = folders
         if folders:
@@ -131,29 +134,33 @@ def _execute(result, logs, code, include, include_root, imports, include_outside
         result["success"] = True
     except BaseException as error:  # SystemExit, KeyboardInterrupt, ...: a snippet must never take the host down
         result["errorKind"] = "Runtime"
-        result["error"] = _format_error(error, root, prefixes, {path for path, _ in files})
+        try:
+            result["error"] = _format_error(error, root, prefixes, {path for path, _ in files})
+        except BaseException:  # the traceback itself cannot be read
+            result["error"] = "%s: %s" % (type(error).__name__, _message(error))
     finally:
         out.flush()
         err.flush()
-        sys.path[:] = saved_path
-        sys.dont_write_bytecode = saved_bytecode
-        _forget_modules(prefixes)
-        try:
-            os.chdir(saved_cwd)
-        except OSError:
-            pass  # the folder is gone: nothing to restore
+        saved.restore(prefixes)
     result["executeMs"] = _ms(executing)
     return result
+
+
+# JSON request field -> the type it must have when present (spec section 1: a wrong type is InvalidRequest).
+_FIELD_TYPES = {"include": list, "imports": list, "includeRoot": str, "includeOutsideRoot": bool}
 
 
 def run_json(payload):
     """JSON request (spec section 1 plus Python-only ``imports`` / ``includeRoot``) -> JSON response."""
     try:
         request = json.loads(payload)
-    except ValueError as error:
-        return _invalid("request is not JSON: %s" % error)
+    except Exception as error:  # ValueError, RecursionError (deep nesting), TypeError (not a string)
+        return _invalid("request is not JSON: %s" % _message(error))
     if not isinstance(request, dict):
         return _invalid("request must be a JSON object")
+    for field, kind in _FIELD_TYPES.items():
+        if request.get(field) is not None and not isinstance(request[field], kind):
+            return _invalid("%s must be a %s" % (field, kind.__name__))
     limits = {name: request[field] for field, name in _LIMIT_FIELDS.items() if request.get(field) is not None}
     response = run(
         request.get("code", ""),
@@ -162,14 +169,18 @@ def run_json(payload):
         imports=request.get("imports") or (),
         include_outside_root=request.get("includeOutsideRoot") is True,
         **limits)
-    return json.dumps(response, default=str)  # a host converter's odd value must not fail the response
+    try:
+        return json.dumps(response, default=str)  # a host converter's odd value must not fail the response
+    except Exception:  # non-string keys, a cycle, a str() that raises
+        response["value"] = _message(response["value"])
+        return json.dumps(response, default=str)
 
 
 def run_b64(payload_b64):
     """Same as :func:`run_json`, with the request base64-encoded: hosts pass it through one string literal."""
     try:
         payload = base64.b64decode(payload_b64).decode("utf-8")
-    except (ValueError, UnicodeDecodeError) as error:
+    except Exception as error:  # ValueError, UnicodeDecodeError, TypeError (not a string)
         return _invalid("request is not base64 UTF-8: %s" % error)
     return run_json(payload)
 
@@ -208,7 +219,7 @@ def _read(path):
     try:
         with tokenize.open(path) as handle:
             return handle.read()
-    except (SyntaxError, UnicodeDecodeError) as error:  # SyntaxError: an unknown or contradicting coding declaration
+    except (SyntaxError, UnicodeDecodeError, LookupError) as error:  # bad / unknown / non-text coding declaration
         raise ValueError("include is not readable as Python source: %s (%s)" % (path, error)) from None
 
 
@@ -227,9 +238,9 @@ def _resolve_include(include, root, outside_root):
         full = os.path.abspath(entry if os.path.isabs(entry) else os.path.join(root, entry))
         if not outside_root and not _prefix(full).startswith(root_prefix):
             raise ValueError("include is outside the include root: %s" % entry)
-        if full in seen:
+        if os.path.normcase(full) in seen:
             continue
-        seen.add(full)
+        seen.add(os.path.normcase(full))
         if os.path.isdir(full):
             folders.append(full)
         elif os.path.isfile(full):
@@ -255,14 +266,64 @@ def _relative(path, root):
     return relative.replace("\\", "/")
 
 
-def _forget_modules(prefixes):
-    """Drop modules imported from include folders, so an edited helper is re-imported on the next run."""
-    if not prefixes:
-        return
-    for name, module in list(sys.modules.items()):
-        location = getattr(module, "__file__", None)
-        if location and _under(location, prefixes):
-            del sys.modules[name]
+class _HostState:
+    """What a run may change in the interpreter and restores afterwards, each step on its own: a snippet that broke one
+    of them (``del sys.path``) must not keep the others from being restored, nor make the runner raise."""
+
+    def __init__(self, code, sources):
+        self.path = list(sys.path)
+        self.bytecode = sys.dont_write_bytecode
+        self.cwd = os.getcwd()
+        self.recursion_limit = sys.getrecursionlimit()
+        self.modules = set(sys.modules)
+        # The agent's own sources, so tracebacks show their lines (and never a same-named file elsewhere on sys.path).
+        lines = dict(sources)
+        lines[SNIPPET_FILE] = code
+        self.saved_lines = {path: linecache.cache.get(path) for path in lines}
+        for path, source in lines.items():
+            linecache.cache[path] = (len(source), None, source.splitlines(True), path)
+
+    def restore(self, prefixes):
+        steps = (
+            lambda: sys.setrecursionlimit(self.recursion_limit),  # first: the other steps need the stack
+            self._restore_path,
+            lambda: sys.__setattr__("dont_write_bytecode", self.bytecode),
+            lambda: os.chdir(self.cwd),
+            lambda: self._forget_modules(prefixes),
+            self._forget_lines,
+        )
+        for step in steps:
+            try:
+                step()
+            except BaseException:  # nothing left to restore it from (the folder is gone, ...): keep restoring the rest
+                pass
+
+    def _restore_path(self):
+        if isinstance(getattr(sys, "path", None), list):
+            sys.path[:] = self.path  # same list object: hosts may hold a reference to it
+        else:
+            sys.path = self.path
+
+    def _forget_modules(self, prefixes):
+        """Drop the modules this run imported from include folders, so an edited helper is re-imported next time. Only
+        those: a host module that happens to live under an include folder stays."""
+        if not prefixes:
+            return
+        for name in set(sys.modules) - self.modules:
+            try:
+                location = sys.modules[name].__file__
+            except BaseException:
+                continue
+            if isinstance(location, str) and _under(location, prefixes):
+                del sys.modules[name]
+
+    def _forget_lines(self):
+        for path, previous in self.saved_lines.items():
+            if previous is None:
+                linecache.cache.pop(path, None)
+            else:
+                linecache.cache[path] = previous
+
 
 
 def _convert(value):
@@ -310,17 +371,15 @@ def _cause(error):
 
 def _format_one(error, root, prefixes, include_files):
     frames = []
-    for frame in traceback.StackSummary.extract(traceback.walk_tb(error.__traceback__), lookup_lines=False):
+    # An explicit limit: a snippet's sys.tracebacklimit must not hide its own frames.
+    walked = traceback.walk_tb(error.__traceback__)
+    for frame in traceback.StackSummary.extract(walked, limit=sys.maxsize, lookup_lines=False):
         if frame.filename == SNIPPET_FILE or frame.filename in include_files:
             frames.append(frame)
         elif _under(frame.filename, prefixes):
             frame.filename = _relative(os.path.abspath(frame.filename), root)
             frames.append(frame)
-    try:
-        message = str(error)
-    except BaseException:  # the exception's own __str__ raised
-        message = "<unprintable message>"
-    lines = ["%s: %s" % (type(error).__name__, message)]
+    lines = ["%s: %s" % (type(error).__name__, _message(error))]
     if len(frames) > 2 * _FRAMES_KEPT:
         left_out = len(frames) - 2 * _FRAMES_KEPT
         lines.extend(_format_frames(frames[:_FRAMES_KEPT]))
@@ -332,7 +391,16 @@ def _format_one(error, root, prefixes, include_files):
 
 
 def _format_frames(frames):
-    return [line.rstrip("\n") for line in traceback.format_list(frames)]
+    # One frame at a time: format_list would fold repeated frames, and the kept frames are exactly the first and last 10.
+    return [traceback.format_list([frame])[0].rstrip("\n") for frame in frames]
+
+
+def _message(value):
+    """``str(value)``, or a placeholder when its own ``__str__`` raises."""
+    try:
+        return str(value)
+    except BaseException:
+        return "<unprintable message>"
 
 
 class _Logs:

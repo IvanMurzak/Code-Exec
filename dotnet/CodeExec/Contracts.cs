@@ -86,7 +86,10 @@ namespace com.IvanMurzak.CodeExec
     {
         public string Id { get; set; } = "";
         public string Severity { get; set; } = "error";
-        /// <summary><c>snippet.cs</c>, an include's relative path, or empty for code the agent did not write.</summary>
+        /// <summary>
+        /// <c>snippet.cs</c>, an include's relative path, <c>usings</c> for a namespace the runtime adds (host defaults or
+        /// the request's), or empty for other code the agent did not write.
+        /// </summary>
         public string File { get; set; } = "";
         public int Line { get; set; }
         public int Column { get; set; }
