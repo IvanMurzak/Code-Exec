@@ -158,9 +158,7 @@ Lengths are in characters: UTF-16 code units in C#, code points in Python. A lim
 
 ## Changelog
 
-- **v0.3.1** — C#: a `static readonly` field of an immutable type (§3.5) no longer counts as static state, so a snippet
-  or include with a lookup table is reused on Mono instead of loading one assembly per run. The Python runtime is
-  unchanged.
+- **v0.3.1** — C#: `static readonly` fields of immutable types are not static state (§3.5). Python is unchanged.
 - **v0.3** — output limits (§6): request fields `maxValueChars`, `maxLogChars`, `maxLogLineChars`, `maxErrorChars`
   (defaults 20000 / 20000 / 2000 / 20000, the caps Unreal-MCP and Godot-MCP applied on their side) and response field
   `truncated`; long tracebacks keep their first and last 10 frames; at most 20 diagnostics. Includes stay inside the

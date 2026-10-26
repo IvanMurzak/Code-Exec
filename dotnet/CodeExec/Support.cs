@@ -158,22 +158,19 @@ namespace com.IvanMurzak.CodeExec
             "System.Collections.ObjectModel.ReadOnlyCollection`1", "System.Collections.ObjectModel.ReadOnlyDictionary`2",
         };
 
-        /// <summary>
-        /// Strings, primitives, enums, a few immutable BCL values (decimal, DateTime, DateTimeOffset, TimeSpan, Guid, and
-        /// nullables of all these), and read-only / immutable collections (by declared type) of immutable elements. Arrays
-        /// are mutable: <c>static readonly int[]</c> stays state.
-        /// </summary>
+        /// <summary>Immutable by declared type (spec §3.5). Arrays are mutable.</summary>
         static bool IsImmutable(Type type)
         {
             if (type.IsPrimitive || type.IsEnum || ImmutableValues.Contains(type))
                 return true;
+            var underlying = Nullable.GetUnderlyingType(type);
+            if (underlying != null)
+                return IsImmutable(underlying);
             if (!type.IsGenericType)
                 return false;
             var definition = type.GetGenericTypeDefinition();
-            if (definition == typeof(Nullable<>))
-                return IsImmutable(type.GetGenericArguments()[0]);
-            var immutable = definition.Namespace == "System.Collections.Immutable"
-                && (definition.Name.StartsWith("Immutable", StringComparison.Ordinal) || definition.Name.StartsWith("IImmutable", StringComparison.Ordinal));
+            // Nested types there are the mutable builders and enumerators.
+            var immutable = definition.Namespace == "System.Collections.Immutable" && !definition.IsNested;
             return (immutable || ReadOnlyViews.Contains(definition.FullName ?? ""))
                 && type.GetGenericArguments().All(IsImmutable);
         }
