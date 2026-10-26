@@ -38,8 +38,8 @@ Every host already has its own Roslyn constraints (Unity pins 4.8 because of `Sy
 ## C# in two lines
 
 ```xml
-<PackageReference Include="com.IvanMurzak.CodeExec" Version="0.3.0" />
-<PackageReference Include="com.IvanMurzak.CodeExec.Roslyn" Version="0.3.0" />
+<PackageReference Include="com.IvanMurzak.CodeExec" Version="0.3.1" />
+<PackageReference Include="com.IvanMurzak.CodeExec.Roslyn" Version="0.3.1" />
 <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.8.0" />  <!-- your choice, 3.8+ -->
 ```
 
