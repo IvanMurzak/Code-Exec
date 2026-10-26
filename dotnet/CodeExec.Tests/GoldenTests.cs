@@ -43,9 +43,7 @@ namespace CodeExecTests
             var runner = Fixtures.Runner(Fixtures.Path(Fixture.GetProperty("includeRoot").GetString()!));
             var result = await runner.ExecuteAsync(request);
             var expect = c.GetProperty("expect");
-            var shownValue = result.Value?.ToString();
-            if (shownValue != null && shownValue.Length > 300)
-                shownValue = shownValue.Substring(0, 300) + "...";
+            var shownValue = result.Value == null ? null : OutputLimits.Clip(result.Value.ToString()!, 300, "test output");
             var describe = $"{name}: success={result.Success} kind={result.ErrorKind} value={shownValue} error={result.Error} diagnostics={string.Join(" | ", result.Diagnostics)}";
 
             Assert.True(expect.GetProperty("success").GetBoolean() == result.Success, describe);

@@ -55,12 +55,13 @@ def run(code, include=(), include_root=None, imports=(), max_value_chars=MAX_VAL
     _execute(result, logs, code, include, include_root, imports, include_outside_root)
 
     result["logs"] = logs.entries()
-    if isinstance(result["value"], str):
-        result["value"] = _clip(result["value"], max_value_chars, "return a slice or a summary", result, "value")
-    if logs.left_out or logs.clipped:
-        result["truncated"].append("logs")
-    if isinstance(result["error"], str):
-        result["error"] = _clip(result["error"], max_error_chars, "raise a shorter message", result, "error")
+    value, error = result["value"], result["error"]
+    if isinstance(value, str):
+        result["value"] = _clip(value, max_value_chars, "return a slice or a summary")
+    if isinstance(error, str):
+        result["error"] = _clip(error, max_error_chars, "raise a shorter message")
+    changed = (("value", result["value"] is not value), ("logs", logs.left_out or logs.clipped), ("error", result["error"] is not error))
+    result["truncated"] = [field for field, truncated in changed if truncated]
     return result
 
 
@@ -99,10 +100,7 @@ def _execute(result, logs, code, include, include_root, imports, include_outside
         })
         result["compileMs"] = _ms(started)
         return _fail(result, "Compile", "Compilation failed")
-    except ValueError as error:  # null bytes in the source raise ValueError, not SyntaxError, on Python 3.10
-        result["compileMs"] = _ms(started)
-        return _fail(result, "Compile", str(error))
-    except RecursionError as error:  # a too deeply nested expression
+    except (ValueError, RecursionError, MemoryError) as error:  # null bytes (3.10), a too deeply nested expression
         result["compileMs"] = _ms(started)
         return _fail(result, "Compile", "%s: %s" % (type(error).__name__, error))
     result["compileMs"] = _ms(started)
@@ -198,12 +196,10 @@ def _ms(since):
     return int((time.perf_counter() - since) * 1000)
 
 
-def _clip(text, limit, hint, result=None, field=None):
-    """Spec section 6: the first ``limit`` characters plus a note saying how much was shown."""
+def _clip(text, limit, hint):
+    """Spec section 6: the first ``limit`` characters plus a note saying how much was shown (``text`` itself if it fits)."""
     if not limit or len(text) <= limit:
         return text
-    if result is not None:
-        result["truncated"].append(field)
     return "%s... [truncated: %d of %d characters shown; %s]" % (text[:limit], limit, len(text), hint)
 
 
@@ -219,7 +215,7 @@ def _read(path):
 def _resolve_include(include, root, outside_root):
     """Folders go on sys.path (import by name); ``.py`` files run in the snippet's namespace first, in order. Both must
     lie inside ``root`` unless the host allows ``outside_root``."""
-    root_prefix = _prefix(root)
+    root_prefix = _prefix(root)  # normcased, ends with a separator: _prefix(path) starts with it for the root and below
     if not isinstance(include, (list, tuple)):
         raise ValueError("include must be a list of paths")
     folders, files, seen = [], [], set()
@@ -229,7 +225,7 @@ def _resolve_include(include, root, outside_root):
         if not entry.strip():
             raise ValueError("include entry is empty")
         full = os.path.abspath(entry if os.path.isabs(entry) else os.path.join(root, entry))
-        if not outside_root and not _under(full, [root_prefix]) and os.path.normcase(full) != os.path.normcase(root):
+        if not outside_root and not _prefix(full).startswith(root_prefix):
             raise ValueError("include is outside the include root: %s" % entry)
         if full in seen:
             continue
@@ -289,7 +285,7 @@ def _format_error(error, root, prefixes, include_files):
     exceptions it was raised from (``__cause__``) or while handling (``__context__``), at most _MAX_CAUSES of them."""
     lines = _format_one(error, root, prefixes, include_files)
     seen = {id(error)}
-    for _ in range(_MAX_CAUSES + 1):
+    while True:
         cause, label = _cause(error)
         if cause is None or id(cause) in seen:
             break
@@ -314,7 +310,7 @@ def _cause(error):
 
 def _format_one(error, root, prefixes, include_files):
     frames = []
-    for frame in traceback.extract_tb(error.__traceback__):
+    for frame in traceback.StackSummary.extract(traceback.walk_tb(error.__traceback__), lookup_lines=False):
         if frame.filename == SNIPPET_FILE or frame.filename in include_files:
             frames.append(frame)
         elif _under(frame.filename, prefixes):
@@ -359,7 +355,7 @@ class _Logs:
         if not self._max:
             self._head.append(entry)
             return
-        size = len(clipped) + _LOG_ENTRY_CHARS
+        size = _cost(entry)
         if self._head_open and self._head_used + size <= self._max * 3 // 4:
             self._head.append(entry)
             self._head_used += size
@@ -368,7 +364,7 @@ class _Logs:
         self._tail.append(entry)
         self._tail_used += size
         while self._tail and self._head_used + self._tail_used > self._max:
-            self._tail_used -= len(self._tail.popleft()["message"]) + _LOG_ENTRY_CHARS
+            self._tail_used -= _cost(self._tail.popleft())
             self.left_out += 1
 
     def entries(self):
@@ -379,6 +375,10 @@ class _Logs:
         return self._head + [marker] + list(self._tail)
 
 
+def _cost(entry):
+    return len(entry["message"]) + _LOG_ENTRY_CHARS
+
+
 class _LogStream(io.TextIOBase):
     """Collects written text as one log entry per line."""
 
@@ -386,7 +386,7 @@ class _LogStream(io.TextIOBase):
         super().__init__()
         self._logs = logs
         self._level = level
-        self._buffer = ""
+        self._parts = []
 
     def writable(self):
         return True
@@ -394,12 +394,16 @@ class _LogStream(io.TextIOBase):
     def write(self, text):
         if not isinstance(text, str):
             raise TypeError("write() argument must be str, not %s" % type(text).__name__)
-        *lines, self._buffer = (self._buffer + text).split("\n")
-        for line in lines:
-            self._logs.add(self._level, line.rstrip("\r"))
+        *ended, rest = text.split("\n")
+        for piece in ended:
+            self._parts.append(piece)
+            self._logs.add(self._level, "".join(self._parts).rstrip("\r"))
+            self._parts = []
+        if rest:
+            self._parts.append(rest)
         return len(text)
 
     def flush(self):
-        if self._buffer:
-            self._logs.add(self._level, self._buffer)
-            self._buffer = ""
+        if self._parts:
+            self._logs.add(self._level, "".join(self._parts))
+            self._parts = []

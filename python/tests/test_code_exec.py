@@ -186,7 +186,7 @@ class RobustnessTests(unittest.TestCase):
         self.assertEqual("line 0", messages[0])
         self.assertEqual("line 19999", messages[-1])
         self.assertTrue(any("log line(s) left out" in m for m in messages))
-        self.assertLessEqual(sum(len(m) + 12 for m in messages if "left out" not in m), runner.MAX_LOG_CHARS)
+        self.assertLessEqual(sum(len(m) + runner._LOG_ENTRY_CHARS for m in messages if "left out" not in m), runner.MAX_LOG_CHARS)
         self.assertEqual(["logs"], result["truncated"])
 
     def test_log_budget_matches_the_batch_rule(self):
@@ -200,7 +200,7 @@ class RobustnessTests(unittest.TestCase):
             for i, size in enumerate(sizes):
                 logs.add("info", "%d" % i + "x" * size)
             messages = [e["message"] for e in logs.entries() if e["level"] == "info"]
-            costs = [len(m) + 12 for m in ("%d" % i + "x" * size for i, size in enumerate(sizes))]
+            costs = [len(m) + runner._LOG_ENTRY_CHARS for m in ("%d" % i + "x" * size for i, size in enumerate(sizes))]
             expected = list(range(len(sizes)))
             if sum(costs) > budget:
                 head, used = 0, 0

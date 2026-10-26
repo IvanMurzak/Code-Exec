@@ -141,26 +141,24 @@ namespace com.IvanMurzak.CodeExec.Roslyn
         {
             var span = d.Location.GetMappedLineSpan();
             var file = span.IsValid ? span.Path ?? "" : "";
-            var index = span.StartLinePosition.Line;
-            if (file == UsingsFile && index >= 0 && index < usings.Count)
+            var line = span.IsValid ? span.StartLinePosition.Line + 1 : 0;
+            var column = span.IsValid ? span.StartLinePosition.Character + 1 : 0;
+            var message = d.GetMessage();
+            if (file == UsingsFile && line >= 1 && line <= usings.Count)
             {
                 // Not the agent's code: name the using (`usings` = the host's defaults plus the request's own).
-                return new CodeDiagnostic
-                {
-                    Id = d.Id,
-                    Severity = d.Severity.ToString().ToLowerInvariant(),
-                    File = "usings",
-                    Message = $"using '{usings[index]}': {d.GetMessage()}",
-                };
+                message = $"using '{usings[line - 1]}': {message}";
+                file = "usings";
+                line = column = 0;
             }
             return new CodeDiagnostic
             {
                 Id = d.Id,
                 Severity = d.Severity.ToString().ToLowerInvariant(),
                 File = file == GeneratedFile ? "" : file,
-                Line = span.IsValid ? span.StartLinePosition.Line + 1 : 0,
-                Column = span.IsValid ? span.StartLinePosition.Character + 1 : 0,
-                Message = d.GetMessage(),
+                Line = line,
+                Column = column,
+                Message = message,
             };
         }
 

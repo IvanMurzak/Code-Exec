@@ -73,15 +73,13 @@ namespace com.IvanMurzak.CodeExec
         {
             var files = new List<SourceFile>();
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var rootFull = Path.GetFullPath(root).TrimEnd('\\', '/');
-            var prefix = rootFull + Path.DirectorySeparatorChar;
+            var prefix = Path.GetFullPath(root).TrimEnd('\\', '/') + Path.DirectorySeparatorChar;
             foreach (var entry in include)
             {
                 if (string.IsNullOrWhiteSpace(entry))
                     throw new ArgumentException("include entry is empty");
                 var full = Path.GetFullPath(Path.IsPathRooted(entry) ? entry : Path.Combine(root, entry)).TrimEnd('\\', '/');
-                var inside = string.Equals(full, rootFull, StringComparison.OrdinalIgnoreCase) || full.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
-                if (!inside && !allowOutsideRoot)
+                if (!allowOutsideRoot && !IsUnder(prefix, full + Path.DirectorySeparatorChar)) // the root itself counts
                     throw new ArgumentException("include is outside the include root: " + entry);
                 IEnumerable<string> paths;
                 if (Directory.Exists(full))
@@ -103,11 +101,9 @@ namespace com.IvanMurzak.CodeExec
             return files;
         }
 
-        static string Relative(string prefix, string path)
-        {
-            var relative = path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ? path.Substring(prefix.Length) : path;
-            return relative.Replace('\\', '/');
-        }
+        static bool IsUnder(string prefix, string path) => path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
+
+        static string Relative(string prefix, string path) => (IsUnder(prefix, path) ? path.Substring(prefix.Length) : path).Replace('\\', '/');
     }
 
     /// <summary>

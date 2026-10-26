@@ -335,7 +335,8 @@ namespace com.IvanMurzak.CodeExec
 
             var loaded = _host.Load(image, symbols, entry.AssemblyName);
             Interlocked.Increment(ref Stats.loadedAssemblies); // permanent, even when a concurrent run wins below
-            if (StaticState.Has(loaded.Assembly))
+            entry.HasStaticState ??= StaticState.Has(loaded.Assembly); // the same for every copy: reflect once
+            if (entry.HasStaticState == true)
                 return loaded; // stays an image in the LRU: the next identical request loads it again
             lock (_cacheLock)
             {
@@ -427,18 +428,12 @@ namespace com.IvanMurzak.CodeExec
                 exception = exception.InnerException;
             var sb = new StringBuilder();
             AppendException(sb, exception, snippet);
-            var inner = InnerOf(exception);
-            for (var depth = 0; inner != null && depth < OutputLimits.MaxCauses; depth++, inner = InnerOf(inner))
+            var inner = exception.InnerException;
+            for (var depth = 0; inner != null && depth < OutputLimits.MaxCauses; depth++, inner = inner.InnerException)
                 AppendException(sb.AppendLine().Append(" ---> "), inner, snippet);
             if (inner != null)
                 sb.AppendLine().Append(" ---> ... more inner exception(s) left out");
             return sb.ToString();
-        }
-
-        static Exception? InnerOf(Exception exception)
-        {
-            try { return exception.InnerException; }
-            catch (Exception) { return null; }
         }
 
         static void AppendException(StringBuilder sb, Exception exception, Assembly? snippet)
@@ -573,6 +568,9 @@ namespace com.IvanMurzak.CodeExec
             public string EntryMethod { get; }
             public string? ResultType { get; }
             public IReadOnlyList<string> AutoImported { get; }
+
+            /// <summary>Hosts that cannot unload: whether the snippet declares static state (then it is never reused).</summary>
+            public bool? HasStaticState { get; set; }
 
             /// <summary>Set only for hosts that cannot unload (Mono): the assembly is loaded once and reused.</summary>
             public ILoadedAssembly? Loaded { get; set; }
