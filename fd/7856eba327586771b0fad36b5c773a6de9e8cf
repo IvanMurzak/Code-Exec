@@ -1,0 +1,37 @@
+python/code_exec/runner.py
+  s_7bc72ecaebd05d::t_e0da5b69bb8b76 288
+  s_7bc72ecaebd05d::t_9e2e0fe559fc19 9,56-60,117,137-140,144,149-152,157-158,161-163,172-176,183,222,241,243,269-287,289-326,374-376,382,394-403
+dotnet/CodeExec/Contracts.cs
+  s_7bc72ecaebd05d::t_e96e3cd9480966 89-92
+python/tests/test_code_exec.py
+  s_7bc72ecaebd05d::t_e0da5b69bb8b76 132-138,280-344
+  s_7bc72ecaebd05d::t_4aeb45039fb516 345
+dotnet/CodeExec.Tests/RunnerTests.cs
+  s_7bc72ecaebd05d::t_4e74afbb76824e 654-686
+dotnet/CodeExec/Support.cs
+  s_7bc72ecaebd05d::t_e96e3cd9480966 75-78,83-84,106-115,130,132-143
+dotnet/CodeExec/CodeRunner.cs
+  s_7bc72ecaebd05d::t_e96e3cd9480966 156-163,179-180,243,667,672
+spec/contract.md
+  s_7bc72ecaebd05d::t_e0da5b69bb8b76 114-115,117,147-148
+README.md
+  s_7bc72ecaebd05d::t_e96e3cd9480966 61-62
+dotnet/CodeExec/Limits.cs
+  s_7bc72ecaebd05d::t_e96e3cd9480966 28-30,82-84,87
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "fd7856eba327586771b0fad36b5c773a6de9e8cf",
+  "prompts": {},
+  "sessions": {
+    "s_7bc72ecaebd05d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "40274cb2-edf8-49ba-9a73-33b83cb5be53",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}
