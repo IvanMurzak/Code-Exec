@@ -1,0 +1,71 @@
+fixtures/include/python/notes.txt
+  s_7bc72ecaebd05d::t_8ba6f86a41aa48 1
+spec/contract.md
+  s_7bc72ecaebd05d::t_3248aff9f1f155 13,19,26-36,48,87-91,95-96,104-106,119-121,152-158
+  s_7bc72ecaebd05d::t_7b232e58259dc4 1,20-25,52,92-93,114-118,128-148,151
+  s_7bc72ecaebd05d::t_9f516e71c3cabd 94,159
+dotnet/CodeExec.Roslyn/src/SnippetWriter.cs
+  s_7bc72ecaebd05d::t_31c6cf3666d3f2 71-73
+python/code_exec/__init__.py
+  s_7bc72ecaebd05d::t_3248aff9f1f155 14
+dotnet/CodeExec.Tests/GoldenTests.cs
+  s_7bc72ecaebd05d::t_95a5b4082a523c 33-36,46-49,78-85
+fixtures/golden/python.json
+  s_7bc72ecaebd05d::t_8ba6f86a41aa48 21-37
+dotnet/CodeExec/CodeRunner.cs
+  s_7bc72ecaebd05d::t_bcd7f57b4336c5 319-320,338-339
+  s_7bc72ecaebd05d::t_2ce2f4d34ba42c 421-422,428-445,449,451
+  s_7bc72ecaebd05d::t_d7c9b569346e55 23-25,163-164,171,236,419-420,423,446-448,452-453,455-465,467-472,587,599,633,659-669,677-678
+README.md
+  s_7bc72ecaebd05d::t_3248aff9f1f155 41-42
+  s_7bc72ecaebd05d::t_e25c95530c378f 60-62,74
+dotnet/CodeExec/Support.cs
+  s_7bc72ecaebd05d::t_bcd7f57b4336c5 114-116,120,123,125,128-133,135
+  s_7bc72ecaebd05d::t_a4aff3a1281b9e 66-69,72,76-77,82-85,90-92,94,100,106,113,117-119,121-122,124,126-127,134
+  s_7bc72ecaebd05d::t_802df0e6c6aad5 136-138
+dotnet/CodeExec/Limits.cs
+  s_7bc72ecaebd05d::t_2ce2f4d34ba42c 22-24
+  s_7bc72ecaebd05d::t_ec0fca14043909 1-21,25-127
+dotnet/Directory.Build.props
+  s_7bc72ecaebd05d::t_3248aff9f1f155 9
+dotnet/CodeExec/Contracts.cs
+  s_7bc72ecaebd05d::t_893e2ea4a00fbd 57-68,121-122
+  s_7bc72ecaebd05d::t_89009454ed1e45 123
+fixtures/include/csharp/notes.txt
+  s_7bc72ecaebd05d::t_8ba6f86a41aa48 1
+python/tests/test_code_exec.py
+  s_7bc72ecaebd05d::t_72ba8517c67578 26-29,44-51,81,84,110,113,132-277
+  s_7bc72ecaebd05d::t_1e85432dbe70f4 278-279
+dotnet/CodeExec.Roslyn/src/RoslynCSharpCompiler.cs
+  s_7bc72ecaebd05d::t_31c6cf3666d3f2 29,92,114,126,128-129,140,144-155
+python/code_exec/runner.py
+  s_7bc72ecaebd05d::t_3380544885be3d 1,6,12,18-22,24,26-34,44,51-54,56-64,68,73-74,80,105-107,112,116,134,143-146,159-160,166-167,182,201-209,211,213,215-216,227-229,323-334,336-361,363-370,372-379,385,387,395-396,399,404
+  s_7bc72ecaebd05d::t_8740ddd0320619 23,362,371
+  s_7bc72ecaebd05d::t_84cc1b6b02352a 25,288-315,335
+  s_7bc72ecaebd05d::t_81fab77f0487f3 232
+  s_7bc72ecaebd05d::t_13eb1273f6050f 45-49,55,67,78,165,219-222,233,240-241
+  s_7bc72ecaebd05d::t_a985c31e1b46de 71,125,223,226
+  s_7bc72ecaebd05d::t_9a4cb074bf3a07 65
+fixtures/golden/csharp.json
+  s_7bc72ecaebd05d::t_8ba6f86a41aa48 374-538
+dotnet/CodeExec.Tests/RunnerTests.cs
+  s_7bc72ecaebd05d::t_afe3d24d93aba4 513,516,526-533,540-605,607-659
+  s_7bc72ecaebd05d::t_bcd7f57b4336c5 514-515,606
+  s_7bc72ecaebd05d::t_aac68fc13aa7ce 517-525,534-539
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "394d2614a499c81b4e4a521f095a9f1a72d09cad",
+  "prompts": {},
+  "sessions": {
+    "s_7bc72ecaebd05d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "40274cb2-edf8-49ba-9a73-33b83cb5be53",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}
