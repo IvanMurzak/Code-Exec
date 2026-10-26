@@ -23,7 +23,10 @@ class GoldenTests(unittest.TestCase):
     def test_golden(self):
         for case in GOLDEN["cases"]:
             with self.subTest(case["name"]):
-                result = code_exec.run(case["code"], include=case.get("include", ()), include_root=INCLUDE_ROOT)
+                # Through the JSON entry point, as hosts call it: every request field of the case is passed as is.
+                request = {key: value for key, value in case.items() if key not in ("name", "expect")}
+                request["includeRoot"] = INCLUDE_ROOT
+                result = json.loads(code_exec.run_json(json.dumps(request)))
                 expect = case["expect"]
                 describe = "%s -> %s" % (case["name"], json.dumps(result))
                 self.assertEqual(expect["success"], result["success"], describe)
@@ -38,6 +41,14 @@ class GoldenTests(unittest.TestCase):
                     self.assertTrue(any(d["file"] == wanted["file"] and d["line"] == wanted["line"] for d in result["diagnostics"]), describe)
                 for text in expect.get("logsContain", ()):
                     self.assertTrue(any(text in entry["message"] for entry in result["logs"]), describe)
+                if "logs" in expect:
+                    self.assertEqual(expect["logs"], [entry["message"] for entry in result["logs"]], describe)
+                if "truncated" in expect:
+                    self.assertEqual(expect["truncated"], result["truncated"], describe)
+                if "valueEndsWith" in expect:
+                    self.assertTrue((result["value"] or "").endswith(expect["valueEndsWith"]), describe[:500])
+                if "valueLength" in expect:
+                    self.assertEqual(expect["valueLength"], len(result["value"] or ""), describe[:500])
 
 
 class BehaviourTests(unittest.TestCase):
@@ -67,9 +78,10 @@ class BehaviourTests(unittest.TestCase):
             path = os.path.join(folder, "latin1.py")
             with open(path, "wb") as handle:
                 handle.write(b"\xff\xfe = 1\n")
-            result = code_exec.run("1", include=[path])
+            result = code_exec.run("1", include=["latin1.py"], include_root=folder)
             self.assertEqual("InvalidRequest", result["errorKind"])
             self.assertIn("latin1.py", result["error"])
+            self.assertIn("not readable as Python source", result["error"])
         finally:
             shutil.rmtree(folder)
 
@@ -95,10 +107,10 @@ class BehaviourTests(unittest.TestCase):
             path = os.path.join(folder, "helper_mod_reload.py")
             with open(path, "w") as handle:
                 handle.write("VALUE = 1\n")
-            first = code_exec.run("import helper_mod_reload\nhelper_mod_reload.VALUE", include=[folder])
+            first = code_exec.run("import helper_mod_reload\nhelper_mod_reload.VALUE", include=[folder], include_outside_root=True)
             with open(path, "w") as handle:
                 handle.write("VALUE = 2\n")
-            second = code_exec.run("import helper_mod_reload\nhelper_mod_reload.VALUE", include=[folder])
+            second = code_exec.run("import helper_mod_reload\nhelper_mod_reload.VALUE", include=[folder], include_outside_root=True)
             self.assertEqual(("1", "2"), (first["value"], second["value"]))
         finally:
             shutil.rmtree(folder)
@@ -115,6 +127,227 @@ class BehaviourTests(unittest.TestCase):
         result = code_exec.run("import sys\nsys.stderr.write('bad\\n')\nprint('partial', end='')")
         self.assertIn({"level": "error", "message": "bad"}, result["logs"])
         self.assertIn({"level": "info", "message": "partial"}, result["logs"])
+
+
+class _Unprintable:
+    def __str__(self):
+        raise RuntimeError("no str")
+
+    __repr__ = __str__
+
+
+class RobustnessTests(unittest.TestCase):
+    """A snippet must never take the host down or flood it (spec sections 4 and 6)."""
+
+    def setUp(self):
+        self.folder = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.folder)
+
+    def write(self, name, data):
+        path = os.path.join(self.folder, name)
+        with open(path, "wb") as handle:
+            handle.write(data)
+        return path
+
+    def test_every_base_exception_is_a_runtime_error(self):
+        for code in ("raise KeyboardInterrupt", "raise GeneratorExit", "class B(BaseException): pass\nraise B()",
+                     "import sys\nsys.exit(0)", "exit()"):
+            with self.subTest(code):
+                result = code_exec.run(code)
+                self.assertEqual("Runtime", result["errorKind"], result)
+
+    def test_keyboard_interrupt_keeps_the_snippet_frames(self):
+        error = code_exec.run("def stop():\n    raise KeyboardInterrupt('now')\nstop()")["error"]
+        self.assertTrue(error.startswith("KeyboardInterrupt: now"), error)
+        self.assertIn('snippet.py", line 2, in stop', error)
+        self.assertNotIn("runner.py", error)
+
+    def test_unprintable_exception_in_a_base_exception_subclass(self):
+        result = code_exec.run("class E(KeyboardInterrupt):\n    def __str__(self):\n        raise KeyboardInterrupt\nraise E()")
+        self.assertEqual("Runtime", result["errorKind"])
+        self.assertIn("E: <unprintable message>", result["error"])
+
+    def test_value_whose_str_and_repr_raise(self):
+        result = code_exec.run("class X:\n    def __repr__(self):\n        raise RuntimeError('no repr')\nX()")
+        self.assertEqual("Runtime", result["errorKind"])
+        self.assertIn("RuntimeError: no repr", result["error"])
+
+    def test_implicit_context_is_reported(self):
+        error = code_exec.run("try:\n    1 / 0\nexcept ZeroDivisionError:\n    raise ValueError('then')")["error"]
+        self.assertTrue(error.startswith("ValueError: then"), error)
+        self.assertIn("Raised while handling: ZeroDivisionError: division by zero", error)
+        suppressed = code_exec.run("try:\n    1 / 0\nexcept ZeroDivisionError:\n    raise ValueError('then') from None")["error"]
+        self.assertNotIn("ZeroDivisionError", suppressed)
+
+    def test_mutual_recursion_traceback_is_bounded(self):
+        result = code_exec.run("def a(n):\n    return b(n)\ndef b(n):\n    return a(n)\na(0)")
+        self.assertEqual("Runtime", result["errorKind"])
+        self.assertIn("frame(s) left out", result["error"])
+        self.assertLess(len(result["error"]), 3000)
+
+    def test_runaway_print_loop_keeps_first_and_last_lines(self):
+        result = code_exec.run("for i in range(20000):\n    print('line', i)")
+        messages = [entry["message"] for entry in result["logs"]]
+        self.assertEqual("line 0", messages[0])
+        self.assertEqual("line 19999", messages[-1])
+        self.assertTrue(any("log line(s) left out" in m for m in messages))
+        self.assertLessEqual(sum(len(m) + runner._LOG_ENTRY_CHARS for m in messages if "left out" not in m), runner.MAX_LOG_CHARS)
+        self.assertEqual(["logs"], result["truncated"])
+
+    def test_log_budget_matches_the_batch_rule(self):
+        # Spec section 6 states the rule over the whole list: the streaming budget must give the same entries.
+        import random
+        rng = random.Random(7)
+        for _ in range(300):
+            sizes = [rng.randint(0, 40) for _ in range(rng.randint(0, 30))]
+            budget = rng.randint(1, 300)
+            logs = runner._Logs(budget, 0)
+            for i, size in enumerate(sizes):
+                logs.add("info", "%d" % i + "x" * size)
+            messages = [e["message"] for e in logs.entries() if e["level"] == "info"]
+            costs = [len(m) + runner._LOG_ENTRY_CHARS for m in ("%d" % i + "x" * size for i, size in enumerate(sizes))]
+            expected = list(range(len(sizes)))
+            if sum(costs) > budget:
+                head, used = 0, 0
+                while head < len(costs) and used + costs[head] <= budget * 3 // 4:
+                    used += costs[head]
+                    head += 1
+                tail = len(costs)
+                while tail > head and used + costs[tail - 1] <= budget:
+                    used += costs[tail - 1]
+                    tail -= 1
+                expected = list(range(head)) + list(range(tail, len(costs)))
+            self.assertEqual(expected, [int(m.rstrip("x")) for m in messages], (sizes, budget))
+
+    def test_huge_value_and_error_are_clipped_by_default(self):
+        self.assertLess(len(code_exec.run("'x' * 5000000")["value"]), 20200)
+        self.assertLess(len(code_exec.run("raise ValueError('y' * 1000000)")["error"]), 20200)
+
+    def test_limits_come_through_the_json_request(self):
+        response = json.loads(code_exec.run_json(json.dumps({"code": "'abcdef'", "maxValueChars": 3})))
+        self.assertEqual("abc... [truncated: 3 of 6 characters shown; return a slice or a summary]", response["value"])
+        for bad in (-1, "10", 1.5, True):
+            with self.subTest(bad):
+                response = json.loads(code_exec.run_json(json.dumps({"code": "1", "maxLogChars": bad})))
+                self.assertEqual("InvalidRequest", response["errorKind"])
+
+    def test_malformed_json_fields_are_invalid_requests(self):
+        for request in ({"code": "1", "includeRoot": 5}, {"code": "1", "imports": [5]}, {"code": "1", "imports": 5},
+                        {"code": "1", "include": [1]}, {"code": "1", "include": 5}):
+            with self.subTest(request):
+                self.assertEqual("InvalidRequest", json.loads(code_exec.run_json(json.dumps(request)))["errorKind"])
+
+    def test_odd_converter_value_still_serializes(self):
+        runner.set_value_converter(lambda v: object())
+        try:
+            response = json.loads(code_exec.run_json(json.dumps({"code": "1"})))
+            self.assertTrue(response["success"], response)
+            self.assertIn("object", response["value"])
+        finally:
+            runner.set_value_converter(None)
+
+    def test_working_directory_is_restored(self):
+        before = os.getcwd()
+        code_exec.run("import os\nos.chdir(%r)" % self.folder)
+        self.assertEqual(before, os.getcwd())
+
+    def test_include_with_bom_or_coding_declaration(self):
+        self.write("bom.py", b"\xef\xbb\xbfA = 1\n")
+        self.write("latin.py", b"# -*- coding: latin-1 -*-\nB = '\xe9'\n")
+        result = code_exec.run("A, B", include=["bom.py", "latin.py"], include_root=self.folder)
+        self.assertTrue(result["success"], result)
+        self.assertEqual('[1, "\\u00e9"]', result["value"])
+
+    def test_include_must_stay_inside_the_root(self):
+        inside = os.path.join(self.folder, "inside")
+        os.mkdir(inside)
+        self.write("outside.py", b"X = 1\n")
+        for entry in ("../outside.py", os.path.join(self.folder, "outside.py")):
+            with self.subTest(entry):
+                result = code_exec.run("X", include=[entry], include_root=inside)
+                self.assertEqual("InvalidRequest", result["errorKind"])
+                self.assertIn("outside the include root", result["error"])
+        allowed = json.loads(code_exec.run_json(json.dumps(
+            {"code": "X", "include": ["../outside.py"], "includeRoot": inside, "includeOutsideRoot": True})))
+        self.assertEqual("1", allowed["value"], allowed)
+        # An absolute path inside the root and the root itself are fine.
+        self.write(os.path.join("inside", "h.py"), b"Y = 2\n")
+        self.assertEqual("2", code_exec.run("Y", include=[os.path.join(inside, "h.py")], include_root=inside)["value"])
+        self.assertTrue(code_exec.run("1", include=["."], include_root=inside)["success"])
+
+    def test_broken_interpreter_state_is_restored_and_reported(self):
+        before_path, before_limit = list(sys.path), sys.getrecursionlimit()
+        for code in ("import sys\ndel sys.path\n1", "import sys\nsys.path = None\n1",
+                     "import sys, inspect\nsys.setrecursionlimit(len(inspect.stack()) + 8)\nraise ValueError('low')"):
+            with self.subTest(code):
+                result = code_exec.run(code)  # must answer, not raise
+                self.assertIn(result["errorKind"], ("None", "Runtime"), result)
+                self.assertEqual(before_path, sys.path)
+                self.assertEqual(before_limit, sys.getrecursionlimit())
+
+    def test_non_text_coding_declaration_is_an_invalid_request(self):
+        self.write("rot.py", b"# coding: rot13\nK = 1\n")
+        self.assertEqual("InvalidRequest", code_exec.run("K", include=["rot.py"], include_root=self.folder)["errorKind"])
+
+    def test_json_entry_points_never_raise(self):
+        self.assertEqual("InvalidRequest", json.loads(code_exec.run_json("[" * 100000))["errorKind"])
+        self.assertEqual("InvalidRequest", json.loads(code_exec.run_b64(None))["errorKind"])
+        for converted in ({(1, 2): 3}, None):
+            runner.set_value_converter(lambda v, converted=converted: converted if converted is not None else _Unprintable())
+            try:
+                response = json.loads(code_exec.run_json(json.dumps({"code": "1"})))
+                self.assertTrue(response["success"], response)
+            finally:
+                runner.set_value_converter(None)
+
+    def test_falsy_wrong_json_types_are_invalid_requests(self):
+        for request in ({"include": ""}, {"include": {}}, {"include": False}, {"imports": {}}, {"imports": 0},
+                        {"includeOutsideRoot": "true"}, {"includeRoot": 0}):
+            request["code"] = "1"
+            with self.subTest(request):
+                self.assertEqual("InvalidRequest", json.loads(code_exec.run_json(json.dumps(request)))["errorKind"])
+
+    def test_host_modules_under_an_include_folder_stay_loaded(self):
+        self.write("hostmod_ce.py", b"STATE = []\n")
+        sys.path.insert(0, self.folder)
+        try:
+            import hostmod_ce
+            code_exec.run("1", include=["."], include_root=self.folder)
+            self.assertIs(hostmod_ce, sys.modules.get("hostmod_ce"))
+        finally:
+            sys.path.remove(self.folder)
+            sys.modules.pop("hostmod_ce", None)
+
+    def test_traceback_shows_the_agents_own_lines(self):
+        cwd = os.getcwd()
+        self.write("snippet.py", b"UNRELATED_LINE_1\nUNRELATED_LINE_2\n")
+        os.chdir(self.folder)  # a stray snippet.py where linecache would look
+        try:
+            error = code_exec.run("import sys\nsys.tracebacklimit = 0\nraise ValueError('mine')")["error"]
+        finally:
+            os.chdir(cwd)
+        self.assertIn('snippet.py", line 3', error)
+        self.assertIn("raise ValueError('mine')", error)
+        self.assertNotIn("UNRELATED", error)
+
+    @unittest.skipUnless(os.name == "nt", "case-insensitive paths")
+    def test_same_include_in_another_case_runs_once(self):
+        self.write("count.py", b"import builtins\nbuiltins._ce_count = getattr(builtins, '_ce_count', 0) + 1\n")
+        try:
+            code_exec.run("1", include=["count.py", "COUNT.py"], include_root=self.folder)
+            import builtins
+            self.assertEqual(1, builtins._ce_count)
+        finally:
+            import builtins
+            builtins.__dict__.pop("_ce_count", None)
+
+    def test_include_file_must_be_python(self):
+        self.write("data.json", b"{}")
+        result = code_exec.run("1", include=["data.json"], include_root=self.folder)
+        self.assertEqual("InvalidRequest", result["errorKind"])
+        self.assertIn("not a .py file", result["error"])
 
 
 if __name__ == "__main__":

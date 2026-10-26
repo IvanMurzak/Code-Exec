@@ -30,6 +30,10 @@ namespace CodeExecTests
                 Usings = Strings(c, "usings"),
                 Include = Strings(c, "include"),
             };
+            if (c.TryGetProperty("maxValueChars", out var maxValue)) request.MaxValueChars = maxValue.GetInt32();
+            if (c.TryGetProperty("maxLogChars", out var maxLogs)) request.MaxLogChars = maxLogs.GetInt32();
+            if (c.TryGetProperty("maxLogLineChars", out var maxLine)) request.MaxLogLineChars = maxLine.GetInt32();
+            if (c.TryGetProperty("maxErrorChars", out var maxError)) request.MaxErrorChars = maxError.GetInt32();
             if (c.TryGetProperty("entry", out var entry))
             {
                 request.EntryType = entry.GetProperty("type").GetString();
@@ -39,7 +43,8 @@ namespace CodeExecTests
             var runner = Fixtures.Runner(Fixtures.Path(Fixture.GetProperty("includeRoot").GetString()!));
             var result = await runner.ExecuteAsync(request);
             var expect = c.GetProperty("expect");
-            var describe = $"{name}: success={result.Success} kind={result.ErrorKind} value={result.Value} error={result.Error} diagnostics={string.Join(" | ", result.Diagnostics)}";
+            var shownValue = result.Value == null ? null : OutputLimits.Clip(result.Value.ToString()!, 300, "test output");
+            var describe = $"{name}: success={result.Success} kind={result.ErrorKind} value={shownValue} error={result.Error} diagnostics={string.Join(" | ", result.Diagnostics)}";
 
             Assert.True(expect.GetProperty("success").GetBoolean() == result.Success, describe);
             if (expect.TryGetProperty("value", out var value))
@@ -68,6 +73,14 @@ namespace CodeExecTests
                 foreach (var text in logs.EnumerateArray())
                     Assert.True(result.Logs.Any(l => l.Message.Contains(text.GetString()!)), describe + " logs=" + string.Join(" | ", result.Logs));
             }
+            if (expect.TryGetProperty("logs", out var exactLogs))
+                Assert.Equal(exactLogs.EnumerateArray().Select(e => e.GetString()!).ToArray(), result.Logs.Select(l => l.Message).ToArray());
+            if (expect.TryGetProperty("truncated", out var truncated))
+                Assert.Equal(truncated.EnumerateArray().Select(e => e.GetString()!).ToArray(), result.Truncated.ToArray());
+            if (expect.TryGetProperty("valueEndsWith", out var endsWith))
+                Assert.True(result.Value is string v && v.EndsWith(endsWith.GetString()!, StringComparison.Ordinal), describe);
+            if (expect.TryGetProperty("valueLength", out var length))
+                Assert.True(result.Value is string v && v.Length == length.GetInt32(), describe);
         }
 
         static string[] Strings(JsonElement c, string property) =>

@@ -371,6 +371,171 @@
         "success": false,
         "errorKind": "EntryPointNotFound"
       }
+    },
+    {
+      "name": "value-clipped",
+      "code": "new string('x', 30)",
+      "maxValueChars": 10,
+      "expect": {
+        "success": true,
+        "value": "xxxxxxxxxx... [truncated: 10 of 30 characters shown; return a slice or a summary]",
+        "truncated": [
+          "value"
+        ]
+      }
+    },
+    {
+      "name": "value-default-limit",
+      "code": "new string('x', 30000)",
+      "expect": {
+        "success": true,
+        "valueEndsWith": "xx... [truncated: 20000 of 30000 characters shown; return a slice or a summary]",
+        "truncated": [
+          "value"
+        ]
+      }
+    },
+    {
+      "name": "value-no-limit",
+      "code": "new string('x', 30000)",
+      "maxValueChars": 0,
+      "expect": {
+        "success": true,
+        "valueLength": 30000,
+        "truncated": []
+      }
+    },
+    {
+      "name": "logs-first-and-last",
+      "code": "for (var i = 0; i < 10; i++) Console.WriteLine($\"line {i}\");",
+      "maxLogChars": 60,
+      "expect": {
+        "success": true,
+        "logs": [
+          "line 0",
+          "line 1",
+          "... 7 log line(s) left out (output over 60 characters): print less, or return a summary",
+          "line 9"
+        ],
+        "truncated": [
+          "logs"
+        ]
+      }
+    },
+    {
+      "name": "log-line-clipped",
+      "code": "Console.WriteLine(new string('y', 50));",
+      "maxLogLineChars": 5,
+      "expect": {
+        "success": true,
+        "logs": [
+          "yyyyy... [truncated: 5 of 50 characters shown; print less]"
+        ],
+        "truncated": [
+          "logs"
+        ]
+      }
+    },
+    {
+      "name": "logs-within-budget",
+      "code": "Console.WriteLine(\"a\");\nConsole.WriteLine(\"b\");",
+      "maxLogChars": 26,
+      "expect": {
+        "success": true,
+        "logs": [
+          "a",
+          "b"
+        ],
+        "truncated": []
+      }
+    },
+    {
+      "name": "error-clipped",
+      "code": "throw new InvalidOperationException(new string('z', 100));",
+      "maxErrorChars": 20,
+      "expect": {
+        "success": false,
+        "errorKind": "Runtime",
+        "errorContains": "... [truncated: 20 of ",
+        "truncated": [
+          "error"
+        ]
+      }
+    },
+    {
+      "name": "limit-negative",
+      "code": "1",
+      "maxValueChars": -1,
+      "expect": {
+        "success": false,
+        "errorKind": "InvalidRequest"
+      }
+    },
+    {
+      "name": "deep-traceback",
+      "code": "int R(int n) => n == 0 ? throw new InvalidOperationException(\"deep\") : R(n - 1);\nR(50)",
+      "expect": {
+        "success": false,
+        "errorKind": "Runtime",
+        "errorContains": "32 frame(s) left out"
+      }
+    },
+    {
+      "name": "exception-message-unprintable",
+      "code": "class E : Exception { public override string Message => throw new InvalidOperationException(); }\nthrow new E();",
+      "expect": {
+        "success": false,
+        "errorKind": "Runtime",
+        "errorContains": "<unprintable message>"
+      }
+    },
+    {
+      "name": "include-outside-root",
+      "code": "1",
+      "include": [
+        "../outside/helper"
+      ],
+      "expect": {
+        "success": false,
+        "errorKind": "InvalidRequest",
+        "errorContains": "outside the include root"
+      }
+    },
+    {
+      "name": "include-wrong-extension",
+      "code": "1",
+      "include": [
+        "notes.txt"
+      ],
+      "expect": {
+        "success": false,
+        "errorKind": "InvalidRequest",
+        "errorContains": "include is not a ."
+      }
+    },
+    {
+      "name": "inner-exception",
+      "code": "throw new Exception(\"outer\", new ArgumentException(\"inner cause\"));",
+      "expect": {
+        "success": false,
+        "errorKind": "Runtime",
+        "errorContains": " ---> System.ArgumentException: inner cause"
+      }
+    },
+    {
+      "name": "bad-using",
+      "code": "1",
+      "usings": [
+        "No.Such.Namespace"
+      ],
+      "expect": {
+        "success": false,
+        "errorKind": "Compile",
+        "diagnostic": {
+          "file": "usings",
+          "line": 0
+        }
+      }
     }
   ]
 }

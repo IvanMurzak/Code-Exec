@@ -18,6 +18,22 @@
     { "name": "include-file", "code": "GREETING + '!'", "include": ["prelude.py"], "expect": { "success": true, "value": "hi!" } },
     { "name": "include-traceback", "code": "explode()", "include": ["broken.py"], "expect": { "success": false, "errorKind": "Runtime", "errorContains": "broken.py" } },
     { "name": "include-missing", "code": "1", "include": ["missing.py"], "expect": { "success": false, "errorKind": "InvalidRequest" } },
-    { "name": "empty-code", "code": "  ", "expect": { "success": false, "errorKind": "InvalidRequest" } }
+    { "name": "empty-code", "code": "  ", "expect": { "success": false, "errorKind": "InvalidRequest" } },
+    {"name": "value-clipped", "code": "'x' * 30", "maxValueChars": 10, "expect": {"success": true, "value": "xxxxxxxxxx... [truncated: 10 of 30 characters shown; return a slice or a summary]", "truncated": ["value"]}},
+    {"name": "value-default-limit", "code": "'x' * 30000", "expect": {"success": true, "valueEndsWith": "xx... [truncated: 20000 of 30000 characters shown; return a slice or a summary]", "truncated": ["value"]}},
+    {"name": "value-no-limit", "code": "'x' * 30000", "maxValueChars": 0, "expect": {"success": true, "valueLength": 30000, "truncated": []}},
+    {"name": "logs-first-and-last", "code": "for i in range(10):\n    print('line %d' % i)", "maxLogChars": 60, "expect": {"success": true, "logs": ["line 0", "line 1", "... 7 log line(s) left out (output over 60 characters): print less, or return a summary", "line 9"], "truncated": ["logs"]}},
+    {"name": "log-line-clipped", "code": "print('y' * 50)", "maxLogLineChars": 5, "expect": {"success": true, "logs": ["yyyyy... [truncated: 5 of 50 characters shown; print less]"], "truncated": ["logs"]}},
+    {"name": "logs-within-budget", "code": "print('a')\nprint('b')", "maxLogChars": 26, "expect": {"success": true, "logs": ["a", "b"], "truncated": []}},
+    {"name": "error-clipped", "code": "raise ValueError('z' * 100)", "maxErrorChars": 20, "expect": {"success": false, "errorKind": "Runtime", "errorContains": "... [truncated: 20 of ", "truncated": ["error"]}},
+    {"name": "limit-negative", "code": "1", "maxValueChars": -1, "expect": {"success": false, "errorKind": "InvalidRequest"}},
+    {"name": "deep-traceback", "code": "def r(n):\n    if n == 0:\n        raise ValueError('deep')\n    return r(n - 1)\nr(50)", "expect": {"success": false, "errorKind": "Runtime", "errorContains": "32 frame(s) left out"}},
+    {"name": "exception-message-unprintable", "code": "class E(Exception):\n    def __str__(self):\n        raise RuntimeError('no')\nraise E()", "expect": {"success": false, "errorKind": "Runtime", "errorContains": "<unprintable message>"}},
+    {"name": "include-outside-root", "code": "1", "include": ["../outside/helper"], "expect": {"success": false, "errorKind": "InvalidRequest", "errorContains": "outside the include root"}},
+    {"name": "include-wrong-extension", "code": "1", "include": ["notes.txt"], "expect": {"success": false, "errorKind": "InvalidRequest", "errorContains": "include is not a ."}},
+    {"name": "keyboard-interrupt", "code": "def stop():\n    raise KeyboardInterrupt('stop')\nstop()", "expect": {"success": false, "errorKind": "Runtime", "errorContains": "KeyboardInterrupt: stop"}},
+    {"name": "base-exception-subclass", "code": "class Halt(BaseException):\n    pass\nraise Halt('x')", "expect": {"success": false, "errorKind": "Runtime", "errorContains": "Halt: x"}},
+    {"name": "generator-exit", "code": "raise GeneratorExit()", "expect": {"success": false, "errorKind": "Runtime", "errorContains": "GeneratorExit"}},
+    {"name": "chained-cause", "code": "try:\n    {}['k']\nexcept KeyError as e:\n    raise ValueError('outer') from e", "expect": {"success": false, "errorKind": "Runtime", "errorContains": "Caused by: KeyError: 'k'"}}
   ]
 }
