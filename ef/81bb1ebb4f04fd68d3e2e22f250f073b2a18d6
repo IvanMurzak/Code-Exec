@@ -1,0 +1,31 @@
+dotnet/CodeExec.Roslyn/src/RoslynCSharpCompiler.cs
+  s_7bc72ecaebd05d::t_537d121077a23e 144-147,150-152,159-161
+dotnet/CodeExec/Support.cs
+  s_7bc72ecaebd05d::t_537d121077a23e 76,82,104-106
+python/code_exec/runner.py
+  s_7bc72ecaebd05d::t_100178aa4d850f 58-64
+  s_7bc72ecaebd05d::t_bc5aa9ae5c358a 103,199-200,218,228,288,313,358,367,378-381,389,397-403,407-409
+dotnet/CodeExec.Tests/GoldenTests.cs
+  s_7bc72ecaebd05d::t_537d121077a23e 46
+dotnet/CodeExec/CodeRunner.cs
+  s_7bc72ecaebd05d::t_537d121077a23e 338-339,431-432,572-573
+  s_7bc72ecaebd05d::t_624686ecbf9812 574
+python/tests/test_code_exec.py
+  s_7bc72ecaebd05d::t_d6443341854019 189,203
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ef81bb1ebb4f04fd68d3e2e22f250f073b2a18d6",
+  "prompts": {},
+  "sessions": {
+    "s_7bc72ecaebd05d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "40274cb2-edf8-49ba-9a73-33b83cb5be53",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}
