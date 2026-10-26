@@ -1,0 +1,63 @@
+.github/workflows/ci.yml
+  s_a4bd5ddb53fd2d::t_074e83a41f6b4d 74
+fixtures/golden/csharp.json
+  s_a4bd5ddb53fd2d::t_e64e85e77fabdc 4-303
+python/code_exec/__init__.py
+  s_a4bd5ddb53fd2d::t_aaf0984aad5e91 11,13
+python/code_exec/runner.py
+  s_a4bd5ddb53fd2d::t_9d2b8124238893 25,35,40,62-63,70,72-73,77-78,81,85,91,101,103-104,109,117,135-138,153,157-159,161,163,169-170,173-180,183,185,189,193-197,204,208,212,214-215,235-236
+scripts/test-all.sh
+  s_a4bd5ddb53fd2d::t_074e83a41f6b4d 2-4,7-8,13-14
+dotnet/CodeExec/Hosting.cs
+  s_a4bd5ddb53fd2d::t_8f3a1b758bad00 2,27,35-36,38-43,78,90,104,106-132,136,138,144-145,147-149
+dotnet/CodeExec/CodeRunner.cs
+  s_a4bd5ddb53fd2d::t_d71317fd2b8540 150
+  s_a4bd5ddb53fd2d::t_eece8da8a98632 203
+  s_a4bd5ddb53fd2d::t_df24de6b6f0ab3 214,225,244,247-250,265,267,269,274-275,280-282,284-290,303-327,329-338,345-346,351,361,363,366,368-370,377,379,387-391,410-412,421-441,463,467,475-477,489,496-497,499-502
+  s_a4bd5ddb53fd2d::t_fc641efd7cc5da 194
+  s_a4bd5ddb53fd2d::t_96a312aed95b40 86-95
+scripts/consume.sh
+  s_a4bd5ddb53fd2d::t_074e83a41f6b4d 1-10
+.github/workflows/release.yml
+  s_a4bd5ddb53fd2d::t_074e83a41f6b4d 93,96
+dotnet/CodeExec/References.cs
+  s_a4bd5ddb53fd2d::t_2710fbc11c29b3 5,9-12,19-21,26-28,41-56,59,61-62
+dotnet/CodeExec.Tests/RunnerTests.cs
+  s_a4bd5ddb53fd2d::t_9c626c07b2772e 141-157
+  s_a4bd5ddb53fd2d::t_547c0e8dd85f77 140
+dotnet/CodeExec/Support.cs
+  s_a4bd5ddb53fd2d::t_456dd52db064a9 5-6,14-17,21-22,24-25,27,29-31,36-54,115,124-130
+  s_a4bd5ddb53fd2d::t_dc10a875b34615 167-171,173-176,178,181
+  s_a4bd5ddb53fd2d::t_e4ea2cdd85bdce 192-193
+  s_5e2881ed8bfd52::t_7d041cbe3600f3 131
+dotnet/CodeExec.Roslyn/src/SnippetWriter.cs
+  s_a4bd5ddb53fd2d::t_a4da7c0d94b9cf 11,26,29,33-35,43-46,51,53-58,74,78,87-90,92-95,97,99-101,103,106,114-115,117-120,123,125,129,136-138
+dotnet/CodeExec.Roslyn/src/RoslynCSharpCompiler.cs
+  s_a4bd5ddb53fd2d::t_d51ac97d4406dc 9,16,30-37,49,56,60,62-71,73-75,77-78,84,86,88-92,94-95,108-112,134,136-141,143,145-148,150-152,154-160
+spec/contract.md
+  s_a4bd5ddb53fd2d::t_afe3f784952d71 41-47
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "87515dee9e24c0c5e28121d728750f1cccd9c7ce",
+  "prompts": {},
+  "sessions": {
+    "s_5e2881ed8bfd52": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a139fe-5e37-7630-a5ee-38fd3b09c0dd",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    },
+    "s_a4bd5ddb53fd2d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "97ee1b50-e171-4dcb-8ce1-b70a7701b61f",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}
