@@ -532,6 +532,10 @@ namespace CodeExecTests
         [InlineData("public static class A { public static readonly int[] C = new int[1]; }\n++A.C[0]", "1", true)]
         [InlineData("public static class R { public static readonly IReadOnlyList<List<int>> L = new[] { new List<int>() }; }\nR.L[0].Add(1);\nR.L[0].Count", "1", true)]
         [InlineData("public static class X { public static readonly string S = \"s\"; public static int N; }\n++X.N", "1", true)]
+        [InlineData("public static class GL { public static List<int> L { get; } = new List<int>(); }\nGL.L.Add(1);\nGL.L.Count", "1", true)]
+        [InlineData("public static class P { public static readonly IntPtr Mem = System.Runtime.InteropServices.Marshal.AllocHGlobal(4); static P() { System.Runtime.InteropServices.Marshal.WriteInt32(Mem, 0); } }\nvar n = System.Runtime.InteropServices.Marshal.ReadInt32(P.Mem) + 1;\nSystem.Runtime.InteropServices.Marshal.WriteInt32(P.Mem, n);\nn", "1", true)]
+        // a view the snippet implements itself can hide state in its instance
+        [InlineData("public sealed class Ctr : IReadOnlyList<int> { int n; public int this[int i] => ++n; public int Count => 1; public IEnumerator<int> GetEnumerator() { yield return this[0]; } System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator(); }\npublic static class S { public static readonly IReadOnlyList<int> L = new Ctr(); }\nS.L[0]", "1", true)]
         public void StatefulSnippetsNeverSeeAnotherRunsStatics(string code, string expected, bool stateful)
         {
             var runner = Fixtures.Runner(configure: o => o.Host = new DefaultAssemblyHost());

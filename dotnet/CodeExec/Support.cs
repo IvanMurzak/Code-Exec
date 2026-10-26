@@ -130,11 +130,14 @@ namespace com.IvanMurzak.CodeExec
             const BindingFlags flags = BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
             try
             {
-                foreach (var type in assembly.GetTypes())
+                // The compiler's own types (lambda caches, array-initializer data, collection-expression wrappers) are skipped.
+                var types = assembly.GetTypes().Where(t => !t.IsDefined(typeof(CompilerGeneratedAttribute), false)).ToList();
+                // A collection view the snippet implements (or derives) itself may keep state in its instance: then no view
+                // type is trusted to be immutable.
+                var trustViews = !types.Any(ImplementsView);
+                foreach (var type in types)
                 {
-                    if (type.IsDefined(typeof(CompilerGeneratedAttribute), false))
-                        continue;
-                    if (type.GetFields(flags).Any(f => !f.IsLiteral && !(f.IsInitOnly && IsImmutable(f.FieldType))))
+                    if (type.GetFields(flags).Any(f => !f.IsLiteral && !(f.IsInitOnly && IsImmutable(f.FieldType, trustViews))))
                         return true;
                 }
                 return false;
@@ -158,21 +161,34 @@ namespace com.IvanMurzak.CodeExec
             "System.Collections.ObjectModel.ReadOnlyCollection`1", "System.Collections.ObjectModel.ReadOnlyDictionary`2",
         };
 
-        /// <summary>Immutable by declared type (spec §3.5). Arrays are mutable.</summary>
-        static bool IsImmutable(Type type)
+        /// <summary>Immutable by declared type (spec §3.5). Arrays and pointer-sized integers (native memory) are mutable.</summary>
+        static bool IsImmutable(Type type, bool trustViews)
         {
-            if (type.IsPrimitive || type.IsEnum || ImmutableValues.Contains(type))
+            if ((type.IsPrimitive && type != typeof(IntPtr) && type != typeof(UIntPtr)) || type.IsEnum || ImmutableValues.Contains(type))
                 return true;
             var underlying = Nullable.GetUnderlyingType(type);
             if (underlying != null)
-                return IsImmutable(underlying);
+                return IsImmutable(underlying, trustViews);
+            return trustViews && IsView(type) && type.GetGenericArguments().All(t => IsImmutable(t, trustViews));
+        }
+
+        static bool IsView(Type type)
+        {
             if (!type.IsGenericType)
                 return false;
             var definition = type.GetGenericTypeDefinition();
             // Nested types there are the mutable builders and enumerators.
-            var immutable = definition.Namespace == "System.Collections.Immutable" && !definition.IsNested;
-            return (immutable || ReadOnlyViews.Contains(definition.FullName ?? ""))
-                && type.GetGenericArguments().All(IsImmutable);
+            return (definition.Namespace == "System.Collections.Immutable" && !definition.IsNested) || ReadOnlyViews.Contains(definition.FullName ?? "");
+        }
+
+        static bool ImplementsView(Type type)
+        {
+            for (var t = (Type?)type; t != null; t = t.BaseType)
+            {
+                if (IsView(t))
+                    return true;
+            }
+            return type.GetInterfaces().Any(IsView);
         }
     }
 
