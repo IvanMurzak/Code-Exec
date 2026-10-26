@@ -6,7 +6,7 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <NoWarn>$(NoWarn);CS1591</NoWarn>
     <Deterministic>true</Deterministic>
-    <Version>0.2.1</Version>
+    <Version>0.3.0</Version>
     <Authors>Ivan Murzak</Authors>
     <Copyright>Copyright (c) 2026 Ivan Murzak</Copyright>
     <RepositoryUrl>https://github.com/IvanMurzak/Code-Exec</RepositoryUrl>

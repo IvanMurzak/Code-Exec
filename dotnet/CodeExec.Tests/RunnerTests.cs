@@ -510,5 +510,152 @@ namespace CodeExecTests
         public void FormatsTypeNames(Type type, string expected) => Assert.Equal(expected, TypeNames.ToCSharp(type));
 
         public static class Outer { public sealed class Inner { } }
+
+        // A host that cannot unload reuses a snippet's assembly only when the snippet has no static state of its own:
+        // every run of a stateful one starts from fresh statics, as on a host that unloads.
+        [Theory]
+        [InlineData("public static class Ctr { public static int N; }\n++Ctr.N", "1", true)]
+        [InlineData("static int counter = 3;\n++counter", "4", true)]
+        [InlineData("public static class K { public static readonly List<int> L = new List<int>(); }\nK.L.Add(1);\nK.L.Count", "1", true)]
+        [InlineData("public static class P { public static int N { get; set; } }\n++P.N", "1", true)]
+        [InlineData("public static class Cache { public static Func<int> F; public static int Calls; }\nCache.F ??= () => ++Cache.Calls;\nCache.F()", "1", true)]
+        [InlineData("Func<int, int> twice = x => x * 2;\nnew[] { 1, 2 }.Select(twice).Sum()", "6", false)] // lambda caches only
+        [InlineData("var seen = new List<int>();\nFunc<int, int> twice = x => x * 2;\nseen.Add(twice(1));\nnew[] { 1, 2 }.Sum() + seen.Count", "4", false)]
+        [InlineData("const int K = 2;\nnew[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 }.Length * K", "20", false)] // array data only
+        public void StatefulSnippetsNeverSeeAnotherRunsStatics(string code, string expected, bool stateful)
+        {
+            var runner = Fixtures.Runner(configure: o => o.Host = new DefaultAssemblyHost());
+            for (var i = 0; i < 3; i++)
+            {
+                var result = runner.Execute(new ExecuteRequest { Code = code });
+                Assert.True(result.Success, result.Error);
+                Assert.Equal(expected, result.Value);
+            }
+            // A stateful snippet loads on every run. A stateless one is reused (the first run may load twice: assemblies
+            // the process loads during it change the reference set, hence the cache key).
+            if (stateful)
+                Assert.Equal(3, runner.Stats.LoadedAssemblies);
+            else
+                Assert.True(runner.Stats.LoadedAssemblies < 3, "loads: " + runner.Stats.LoadedAssemblies);
+        }
+
+        [Fact]
+        public void FailingStaticInitializerOnReuseIsARuntimeError()
+        {
+            var runner = Fixtures.Runner(configure: o => o.Host = new DefaultAssemblyHost());
+            const string code = "public static class Boom { public static int Runs; static Boom() { if (System.Environment.GetEnvironmentVariable(\"CODEEXEC_TEST_BOOM\") == \"1\") throw new InvalidOperationException(\"init\"); } }\n++Boom.Runs";
+            Assert.Equal("1", runner.Execute(new ExecuteRequest { Code = code }).Value);
+            Environment.SetEnvironmentVariable("CODEEXEC_TEST_BOOM", "1");
+            try
+            {
+                var result = runner.Execute(new ExecuteRequest { Code = code });
+                Assert.Equal(ErrorKind.Runtime, result.ErrorKind);
+                Assert.Contains("init", result.Error);
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("CODEEXEC_TEST_BOOM", null);
+            }
+        }
+
+        [Fact]
+        public void BadUsingIsReportedAsTheUsing()
+        {
+            var result = Fixtures.Runner().Execute(new ExecuteRequest { Code = "1", Usings = new[] { "No.Such.Namespace" } });
+            Assert.Equal(ErrorKind.Compile, result.ErrorKind);
+            var diagnostic = Assert.Single(result.Diagnostics);
+            Assert.Equal("usings", diagnostic.File);
+            Assert.Equal(0, diagnostic.Line);
+            Assert.StartsWith("using 'No.Such.Namespace': ", diagnostic.Message);
+        }
+
+        [Fact]
+        public void SnippetErrorsKeepTheirCoordinatesNextToUsings()
+        {
+            var result = Fixtures.Runner().Execute(new ExecuteRequest { Code = "var a = 1;\nundefinedThing", Usings = new[] { "System.Text" } });
+            var diagnostic = Assert.Single(result.Diagnostics);
+            Assert.Equal("snippet.cs", diagnostic.File);
+            Assert.Equal(2, diagnostic.Line);
+        }
+
+        [Fact]
+        public void DiagnosticsAreCapped()
+        {
+            var code = string.Join("\n", Enumerable.Range(0, 30).Select(i => $"int x{i} = \"s\";"));
+            var result = Fixtures.Runner().Execute(new ExecuteRequest { Code = code });
+            Assert.Equal(ErrorKind.Compile, result.ErrorKind);
+            Assert.Equal(OutputLimits.MaxDiagnostics + 1, result.Diagnostics.Count);
+            Assert.Equal("CE0002", result.Diagnostics.Last().Id);
+            Assert.StartsWith("10 more diagnostic(s) left out", result.Diagnostics.Last().Message);
+        }
+
+        [Fact]
+        public void IncludeOutsideTheRootNeedsTheHostsConsent()
+        {
+            var root = Fixtures.Path("fixtures/include/csharp/geo");
+            var outside = Fixtures.Path("fixtures/include/csharp/Broken.cs");
+            foreach (var entry in new[] { "../Broken.cs", outside })
+            {
+                var refused = Fixtures.Runner(root).Execute(new ExecuteRequest { Code = "1", Include = new[] { entry } });
+                Assert.Equal(ErrorKind.InvalidRequest, refused.ErrorKind);
+                Assert.Contains("outside the include root", refused.Error);
+            }
+            var allowed = Fixtures.Runner(root, o => o.AllowIncludeOutsideRoot = true).Execute(new ExecuteRequest { Code = "1", Include = new[] { "../Broken.cs" } });
+            Assert.Equal(ErrorKind.Compile, allowed.ErrorKind); // Broken.cs is read and compiled now
+            // An absolute path inside the root is fine, and is reported relative to it.
+            var inside = Fixtures.Runner(root).Execute(new ExecuteRequest { Code = "1", Include = new[] { root } });
+            Assert.True(inside.Success, inside.Error);
+        }
+
+        [Fact]
+        public void InnerExceptionsAreReportedAndBounded()
+        {
+            var result = Fixtures.Runner().Execute(new ExecuteRequest
+            {
+                Code = "Exception e = new ArgumentException(\"cause 0\");\nfor (var i = 1; i < 9; i++) e = new InvalidOperationException(\"cause \" + i, e);\nthrow e;",
+            });
+            Assert.Equal(ErrorKind.Runtime, result.ErrorKind);
+            Assert.StartsWith("System.InvalidOperationException: cause 8", result.Error);
+            Assert.Contains(" ---> System.InvalidOperationException: cause 3", result.Error);
+            Assert.DoesNotContain("cause 2", result.Error);
+            Assert.Contains(" ---> ... more inner exception(s) left out", result.Error);
+        }
+
+        [Fact]
+        public void RunawayConsoleOutputKeepsFirstAndLastLines()
+        {
+            var result = Fixtures.Runner().Execute(new ExecuteRequest { Code = "for (var i = 0; i < 20000; i++) Console.WriteLine(\"line \" + i);" });
+            Assert.True(result.Success, result.Error);
+            Assert.Equal("line 0", result.Logs.First().Message);
+            Assert.Equal("line 19999", result.Logs.Last().Message);
+            Assert.Single(result.Logs, l => l.Level == "warning" && l.Message.Contains("log line(s) left out"));
+            Assert.True(result.Logs.Where(l => l.Level != "warning").Sum(l => l.Message.Length + OutputLimits.LogEntryChars) <= OutputLimits.DefaultLogChars);
+            Assert.Equal(new[] { "logs" }, result.Truncated);
+        }
+
+        [Fact]
+        public void NonTextValueIsLeftToTheHost()
+        {
+            var big = Enumerable.Range(0, 200000).ToArray();
+            var result = Fixtures.Runner(configure: o => o.ValueConverter = v => v is int[] a ? a.Length : v).Execute(new ExecuteRequest { Code = "Enumerable.Range(0, 200000).ToArray()" });
+            Assert.Equal(big.Length, result.Value);
+            Assert.Empty(result.Truncated);
+        }
+
+        [Fact]
+        public void ClipNeverSplitsASurrogatePair()
+        {
+            var clipped = OutputLimits.Clip("ab\U0001F600cd", 3, "hint");
+            Assert.Equal("ab... [truncated: 2 of 6 characters shown; hint]", clipped);
+            Assert.Equal("abc", OutputLimits.Clip("abc", 3, "hint"));
+            Assert.Equal("abcdef", OutputLimits.Clip("abcdef", 0, "hint"));
+        }
+
+        [Fact]
+        public void NegativeLimitIsAnInvalidRequest()
+        {
+            var result = Fixtures.Runner().Execute(new ExecuteRequest { Code = "1", MaxErrorChars = -5 });
+            Assert.Equal(ErrorKind.InvalidRequest, result.ErrorKind);
+        }
     }
 }

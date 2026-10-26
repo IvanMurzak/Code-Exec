@@ -38,8 +38,8 @@ Every host already has its own Roslyn constraints (Unity pins 4.8 because of `Sy
 ## C# in two lines
 
 ```xml
-<PackageReference Include="com.IvanMurzak.CodeExec" Version="0.2.1" />
-<PackageReference Include="com.IvanMurzak.CodeExec.Roslyn" Version="0.2.1" />
+<PackageReference Include="com.IvanMurzak.CodeExec" Version="0.3.0" />
+<PackageReference Include="com.IvanMurzak.CodeExec.Roslyn" Version="0.3.0" />
 <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.8.0" />  <!-- your choice, 3.8+ -->
 ```
 
@@ -57,6 +57,9 @@ ExecuteResult result = await runner.ExecuteAsync(new ExecuteRequest { Code = "Ap
 - Unknown simple names are imported automatically when exactly one namespace defines them (`autoImported`);
   ambiguous names are reported, never guessed. CoreLib's `Internal.*` namespaces are never imported.
 - `ValueConverter` turns the result into something that outlives the snippet (Unity: ReflectorNet JSON).
+- Output is limited before it reaches the agent ([§6](spec/contract.md#6-output-limits)): a text value, the logs (first
+  and last lines kept) and the error, 20k characters each by default (`MaxValueChars`, `MaxLogChars`, `MaxLogLineChars`,
+  `MaxErrorChars` on the request; 0 = no limit). Includes stay inside `IncludeRoot` unless `AllowIncludeOutsideRoot`.
 - Hosts that load assemblies from memory (Godot's game assembly) pass a `locationResolver` to
   `LoadedAssembliesReferenceProvider`, otherwise snippets cannot see those types. On CoreCLR a snippet binds to the
   copy the process already runs (any load context) before the default context is asked, so a host's
@@ -68,6 +71,7 @@ ExecuteResult result = await runner.ExecuteAsync(new ExecuteRequest { Code = "Ap
 import code_exec
 code_exec.run("x = 21\nx * 2", include=["helpers"], include_root=".ai-game-dev/snippets", imports=["unreal"])
 code_exec.run_b64(base64_json_request)   # JSON in, JSON out: one string literal from C++
+code_exec.run("print('x')", max_log_chars=0)   # the same limits as C# (JSON: maxLogChars, ...); 0 = no limit
 ```
 
 ## Development
