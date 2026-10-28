@@ -224,16 +224,45 @@ namespace CodeExecTests
         }
 
         [Fact]
-        public void FullSourceModeDoesNotClaimAutoImports()
+        public void FullSourceModeAutoImportsButGetsNoDefaultUsings()
         {
-            var result = Fixtures.Runner().Execute(new ExecuteRequest
+            // Not a default using: auto-import adds it (spec §3.2, §3.3).
+            var imported = Fixtures.Runner().Execute(new ExecuteRequest
             {
-                Code = "public static class E { public static object Run() => new StringBuilder(); }",
+                Code = "public static class E { public static object Run() => new StringBuilder(\"sb\"); }",
                 EntryType = "E",
                 EntryMethod = "Run",
             });
-            Assert.Equal(ErrorKind.Compile, result.ErrorKind);
-            Assert.Empty(result.AutoImported);
+            Assert.True(imported.Success, imported.Error);
+            Assert.Equal("sb", imported.Value);
+            Assert.Equal(new[] { "System.Text" }, imported.AutoImported);
+
+            // The request's usings apply; the host's defaults (System.Linq here) do not, and CE0003 says so.
+            var withUsing = Fixtures.Runner().Execute(new ExecuteRequest
+            {
+                Code = "public static class E { public static object Run() => Enumerable.Range(0, 3).Count(); }",
+                EntryType = "E",
+                EntryMethod = "Run",
+                Usings = new[] { "System.Linq" },
+            });
+            Assert.True(withUsing.Success, withUsing.Error);
+            var unknown = Fixtures.Runner().Execute(new ExecuteRequest
+            {
+                Code = "public static class E { public static object Run() => NoSuchType.Value; }",
+                EntryType = "E",
+                EntryMethod = "Run",
+            });
+            Assert.Equal(ErrorKind.Compile, unknown.ErrorKind);
+            Assert.Contains(unknown.Diagnostics, d => d.Id == "CE0003" && d.Message.Contains("System.Linq") && d.Message.Contains("'NoSuchType'"));
+            Assert.Contains(unknown.Diagnostics, d => d.Id == "CS0103" && d.File == "snippet.cs" && d.Line == 1);
+            var badUsing = Fixtures.Runner().Execute(new ExecuteRequest
+            {
+                Code = "public static class E { public static int Run() => 1; }",
+                EntryType = "E",
+                EntryMethod = "Run",
+                Usings = new[] { "No.Such.Namespace" },
+            });
+            Assert.Contains(badUsing.Diagnostics, d => d.File == "usings" && d.Message.StartsWith("using 'No.Such.Namespace'"));
         }
 
         [Theory]

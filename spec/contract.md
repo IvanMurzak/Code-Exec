@@ -9,11 +9,11 @@ One request/response shape for every runtime (C# and Python) and every host (Uni
 | Field | Type | Meaning |
 |---|---|---|
 | `code` | string, required | The snippet. See §3 (C#) / §4 (Python). |
-| `usings` | string[] | C# only. Extra namespaces, added to the host's defaults. Aliases (`X = A.B`) and `static A.B` are allowed. |
+| `usings` | string[] | C# only. Extra namespaces, added to the host's defaults (full-source mode: to the code alone, §3.2). Aliases (`X = A.B`) and `static A.B` are allowed. |
 | `include` | string[] | Files or folders to compile/load with the snippet (§1.1). |
 | `entry` | `{ type, method }` | C# only. Full-source mode: the code is compiled verbatim and `type.method` is invoked. |
 | `parameters` | `{ name, type, value }[]` | C# only. Arguments passed to the snippet; `type` is a host type, `value` an already-deserialized object. |
-| `timeoutMs` | int | C# only. Upper bound for awaiting an asynchronous result. It does **not** abort code already running. |
+| `timeoutMs` | int | The snippet's time budget. A snippet still running when it is spent stops with `Timeout`: C# through the execution guards (§3.6) and by no longer awaiting an asynchronous result, Python through a watchdog (§4). `0` or absent = the host's default (`120000` unless the host sets another; a host default of `0` = no bound). |
 | `imports` | string[] | Python only. Modules the host binds into the snippet's namespace before it runs (`unreal`). |
 | `includeRoot` | string | Python JSON entry point only (`run_json` / `run_b64`): folder relative `include` paths resolve against. |
 | `includeOutsideRoot` | bool | Python JSON entry point only: the host accepts includes outside the include root (§1.1). Default `false`. |
@@ -22,8 +22,9 @@ One request/response shape for every runtime (C# and Python) and every host (Uni
 | `maxLogLineChars` | int | Output limit for one log message (§6). Default `2000`. |
 | `maxErrorChars` | int | Output limit for `error` (§6). Default `20000`. |
 
-Every field but `code` is optional. For the four limits, `0` means no limit; a negative (or non-integer) limit is
-`InvalidRequest`. A request without them gets the defaults. A field of the wrong JSON type is `InvalidRequest`.
+Every field but `code` is optional. For the four limits, `0` means no limit; a negative (or non-integer) limit or
+`timeoutMs` is `InvalidRequest`. A request without them gets the defaults. A field of the wrong JSON type is
+`InvalidRequest`.
 
 ### 1.1. Includes
 - Relative paths resolve against the host's include root. An include must lie **inside** that root (the root itself
@@ -72,13 +73,17 @@ The snippet is parsed as C# **script** code and rewritten into one ordinary comp
 The generated names are an implementation detail (`__CodeExecSnippet.__Run`); the agent never needs them.
 
 ### 3.2. Full-source mode
-With `entry`, nothing is rewritten: the code is compiled as a regular file and the named static method is invoked
-(namespace-qualified type names allowed). Host defaults are not added. Among overloads, the most specific one for the
+With `entry`, the code is compiled as a regular file and the named static method is invoked (namespace-qualified type
+names allowed). It is not rewritten into a method; it only gets the request's `usings` and the auto-imported namespaces
+(§3.3) in front of it, and the execution guards (§3.6). The host's defaults are **not** added: when names stay
+unresolved, an extra diagnostic `CE0003` says so, naming the defaults and the unresolved names. Code that starts with `extern alias` or
+`global using` gets nothing in front of it (no `usings`, no auto-import). Among overloads, the most specific one for the
 parameters' types is invoked; with none fitting, the only method of that name and parameter count. Anything else
 (ambiguous, several that do not fit) is `EntryPointNotFound`.
 
 ### 3.3. Auto-import
-When compilation fails with unknown names (`CS0246`, `CS0103`), the runtime looks the simple name up among public
+When compilation fails with unknown names (`CS0246`, `CS0103`) in the agent's code (snippet or full source, not
+includes), the runtime looks the simple name up among public
 types of the loaded assemblies, except the runtime's own `Internal` / `Internal.*` namespaces in CoreLib
 (`Internal.Console` writes past log capture). **Exactly one** namespace → it is added, compilation is retried, and the namespace is
 reported in `autoImported`. Several namespaces → no guess: an extra diagnostic `CE0001` lists the candidates.
@@ -89,8 +94,8 @@ in a namespace the runtime adds (the host's defaults and the request's `usings`)
 `0`, and a message that names it: `using 'No.Such.Namespace': The type or namespace name 'No' could not be found ...`.
 Any exception the snippet throws (or its result's conversion throws) is a `Runtime` error: `ExceptionType: message`,
 the snippet's frames, then each inner exception the same way after ` ---> ` (at most 5). An exception whose `Message`
-itself throws is reported as `ExceptionType: <unprintable message>`. What .NET cannot catch at all (a stack overflow)
-still ends the process: a snippet that may recurse deeply must bound its own depth.
+itself throws is reported as `ExceptionType: <unprintable message>`. Runaway recursion and endless loops are stopped
+by the execution guards (§3.6), so neither ends nor freezes the host.
 
 Host defaults that collide (`System` and `UnityEngine` both define `Object` and `Random`: `CS0104`) are the host's to
 settle with alias defaults, e.g. `Object = UnityEngine.Object`, `Random = UnityEngine.Random`.
@@ -116,6 +121,34 @@ so a value read from live host state keeps its first value (`static readonly int
 `static readonly DateTime Started = DateTime.Now`: read live values in a method or property instead); and a host object
 behind a read-only declared type, or a cast back to a mutable type, is not detected.
 
+### 3.6. Execution guards
+.NET cannot catch a stack overflow (it ends the process), and code running on the host's main thread cannot be
+aborted from outside. So the runtime compiles guards into the agent's code (snippet, full source and includes), unless
+the host turns them off (`CodeRunnerOptions.ExecutionGuards`):
+
+- **Recursion.** Every method, local function, accessor, operator, constructor and block-bodied lambda, and the field
+  and property initializers of a class, check the stack every few calls: against the host's allowance
+  (`CodeRunnerOptions.MaxStackBytes`, 1 MiB by default, on the thread that runs the snippet, counted from where the run
+  started) and the runtime's own margin (`RuntimeHelpers.EnsureSufficientExecutionStack`, every thread). Past the
+  allowance or close to the limit the run stops with a `Runtime` error
+  `System.InsufficientExecutionStackException: Recursion too deep: ...`, before a stack overflow could end the host.
+  Not guarded: expression-bodied lambdas (they may be expression trees) and members the compiler generates (a record's
+  `ToString`); recursion that runs only through them is not caught.
+- **Time.** Every loop iteration (`while`, `do`, `for`, `foreach`) and every `goto` counts down and, every few
+  iterations, reads the clock (every iteration while iterations are slow); so do the calls above. Once `timeoutMs` is
+  spent, the run stops with `Timeout`: `System.TimeoutException: The snippet ran longer than its time budget of N ms
+  (timeoutMs) and was stopped.`, with the frame where it was (`snippet.cs:line N`). Code that blocks inside a host or
+  framework call (`Thread.Sleep`, a lock, an engine call that never returns) is stopped only when the call returns.
+- **Once stopped**, every further check throws again, and the agent's `catch` clauses that could catch the stop (no
+  type, `Exception`, `SystemException` or the stop's own type) get a filter that lets it pass, so it reaches the runtime;
+  `finally` blocks still run. That filter makes a few invalid programs compile (a later `catch` that an earlier
+  catch-all would hide: `CS0160`).
+- **After the run.** A run that finished lifts the time budget: callbacks it left behind (events, stored delegates)
+  keep only the stack check. A timed-out run keeps its stop, so what still runs of it (an asynchronous continuation,
+  a thread it started) stops at its next check; on a host that cannot unload (Mono), its assembly is not reused.
+- The guards change no line or column the agent sees (diagnostics, stack frames). They cost about one countdown per
+  loop iteration and per call: on .NET 8 about 1 ns per iteration and 1–7 ns per call of the snippet's own methods.
+
 ## 4. Python snippet semantics
 
 - The snippet is a module body. When the **last statement is an expression**, its value is the result; otherwise `null`.
@@ -131,6 +164,18 @@ behind a read-only declared type, or a cast back to a mutable type, is not detec
   interrupts the host. The traceback keeps only frames from `snippet.py` and the includes, then follows the chain (at
   most 5): `Caused by: ...` for `raise ... from cause`, `Raised while handling: ...` for an implicit `__context__`. An
   exception whose `str()` raises is reported as `ExceptionType: <unprintable message>`.
+- **Time budget.** When `timeoutMs` is spent, a watchdog thread raises `SnippetTimeout` (a `BaseException`) in the
+  snippet's thread, and again every 100 ms while the snippet catches it: `Timeout`, `SnippetTimeout: The snippet ran
+  longer than its time budget of N ms (timeoutMs) and was stopped.` plus the snippet's frames. Python delivers it
+  between bytecodes: pure Python loops stop; a call into C (`time.sleep`, an engine call) finishes first, and a snippet
+  that catches `BaseException` in its loop is not stopped. Python 3.10 never delivers it, nor releases the GIL, in a loop
+  whose body begins with `try` or `with` (`while True: try: ...`): such a run hangs the interpreter there (3.11+ stop
+  it). It needs `ctypes` (`PyThreadState_SetAsyncExc`); without it
+  the budget is not enforced. The stop is disarmed before the runner returns: none reaches the host afterwards.
+  Threads the snippet started are not stopped.
+- **Recursion** ends with Python's own `RecursionError` (`Runtime`) at the interpreter's recursion limit. A snippet that
+  raises that limit (`sys.setrecursionlimit`) can still overflow the C stack through C-level recursion (`repr` /
+  `json.dumps` of a deeply nested list) on Python 3.11 and older, which ends the host; 3.12+ raise `RecursionError`.
 - `value` conversion: `None` → null; `str`, `int`, `float`, `bool` → their `str()`; `dict` / `list` / `tuple` →
   JSON when serializable; anything else → `str()` (hosts may plug a converter, e.g. Unreal objects → path).
 
@@ -160,6 +205,12 @@ Lengths are in characters: UTF-16 code units in C#, code points in Python. A lim
 - `truncated` lists `value`, `logs` and `error` when their limit changed them (a clipped log line counts as `logs`).
 
 ## Changelog
+
+- **Unreleased** — execution guards (§3.6): C# snippets, full source and includes stop with `Runtime`
+  (`Recursion too deep`) before a stack overflow and with `Timeout` once `timeoutMs` is spent, also in synchronous code
+  on the main thread; Python stops with `Timeout` through a watchdog (§4). `timeoutMs` applies to both runtimes; `0`
+  means the host's default (120000), a negative value is `InvalidRequest`. Full-source mode gets the request's `usings`
+  and auto-import, and `CE0003` when names stay unresolved (§3.2).
 
 - **v0.3.1** — C#: `static readonly` fields of immutable types are not static state (§3.5). Python is unchanged.
 - **v0.3** — output limits (§6): request fields `maxValueChars`, `maxLogChars`, `maxLogLineChars`, `maxErrorChars`

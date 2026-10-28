@@ -30,6 +30,7 @@ namespace CodeExecTests
                 Usings = Strings(c, "usings"),
                 Include = Strings(c, "include"),
             };
+            if (c.TryGetProperty("timeoutMs", out var timeout)) request.TimeoutMs = timeout.GetInt32();
             if (c.TryGetProperty("maxValueChars", out var maxValue)) request.MaxValueChars = maxValue.GetInt32();
             if (c.TryGetProperty("maxLogChars", out var maxLogs)) request.MaxLogChars = maxLogs.GetInt32();
             if (c.TryGetProperty("maxLogLineChars", out var maxLine)) request.MaxLogLineChars = maxLine.GetInt32();

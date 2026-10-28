@@ -373,6 +373,40 @@
       }
     },
     {
+      "name": "full-source-auto-import",
+      "code": "public static class Entry { public static string Run() => new StringBuilder(\"sb\").ToString(); }",
+      "entry": {
+        "type": "Entry",
+        "method": "Run"
+      },
+      "expect": {
+        "success": true,
+        "value": "sb",
+        "autoImported": [
+          "System.Text"
+        ]
+      }
+    },
+    {
+      "name": "endless-loop-timeout",
+      "code": "while (true) { }",
+      "timeoutMs": 300,
+      "expect": {
+        "success": false,
+        "errorKind": "Timeout",
+        "errorContains": "time budget of 300 ms"
+      }
+    },
+    {
+      "name": "deep-recursion",
+      "code": "int F(int n) => n == 0 ? 0 : 1 + F(n - 1);\nF(10_000_000)",
+      "expect": {
+        "success": false,
+        "errorKind": "Runtime",
+        "errorContains": "Recursion too deep"
+      }
+    },
+    {
       "name": "value-clipped",
       "code": "new string('x', 30)",
       "maxValueChars": 10,

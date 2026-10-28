@@ -6,6 +6,8 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
+import time
 import unittest
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -348,6 +350,86 @@ class RobustnessTests(unittest.TestCase):
         result = code_exec.run("1", include=["data.json"], include_root=self.folder)
         self.assertEqual("InvalidRequest", result["errorKind"])
         self.assertIn("not a .py file", result["error"])
+
+
+@unittest.skipIf(runner._SET_ASYNC_EXC is None, "no ctypes: the time budget is not enforced")
+class TimeBudgetTests(unittest.TestCase):
+    """Spec section 4: a snippet still running when its time budget is spent is stopped with a Timeout error."""
+
+    def run_timed(self, code, **kwargs):
+        started = time.perf_counter()
+        result = code_exec.run(code, **kwargs)
+        return result, time.perf_counter() - started
+
+    def test_endless_loops_time_out_within_the_budget(self):
+        codes = ["while True: pass",
+                 "def spin():\n    n = 0\n    while True:\n        n += 1\nspin()",
+                 "import itertools\nfor _ in itertools.count():\n    pass"]
+        if sys.version_info >= (3, 11):  # 3.10 never checks for pending exceptions (nor drops the GIL) in this loop
+            codes.append("while True:\n    try:\n        pass\n    except Exception:\n        pass")
+        for code in codes:
+            with self.subTest(code):
+                result, elapsed = self.run_timed(code, timeout_ms=300)
+                self.assertEqual("Timeout", result["errorKind"], result)
+                self.assertTrue(result["error"].startswith(
+                    "SnippetTimeout: The snippet ran longer than its time budget of 300 ms (timeoutMs)"), result["error"])
+                self.assertIn('snippet.py", line', result["error"])
+                self.assertLess(elapsed, 5)
+
+    def test_no_stop_reaches_the_host_afterwards(self):
+        self.assertEqual("Timeout", code_exec.run("while True: pass", timeout_ms=100)["errorKind"])
+        time.sleep(0.4)  # a stray stop would be raised here
+        result = code_exec.run("import time\ntime.sleep(0.3)\n1", timeout_ms=5000)
+        self.assertTrue(result["success"], result)
+        self.assertEqual("1", result["value"])
+        deadline = time.monotonic() + 2
+        while any(t.name == "code_exec watchdog" for t in threading.enumerate()) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertFalse(any(t.name == "code_exec watchdog" for t in threading.enumerate()))
+
+    def test_finished_snippet_is_not_stopped(self):
+        for _ in range(20):  # the stop is disarmed when the snippet ends, whatever the timing
+            result = code_exec.run("sum(range(1000))", timeout_ms=1)
+            self.assertIn(result["errorKind"], ("None", "Timeout"), result)
+        time.sleep(0.2)
+
+    def test_host_default_budget(self):
+        self.assertEqual(120000, runner.TIMEOUT_MS)
+        code_exec.set_default_timeout_ms(200)
+        try:
+            result, elapsed = self.run_timed("while True: pass")
+            self.assertEqual("Timeout", result["errorKind"])
+            self.assertIn("200 ms", result["error"])
+        finally:
+            code_exec.set_default_timeout_ms(runner.TIMEOUT_MS)
+        with self.assertRaises(ValueError):
+            code_exec.set_default_timeout_ms(-1)
+
+    def test_json_timeout_field(self):
+        result = json.loads(code_exec.run_json(json.dumps({"code": "while True: pass", "timeoutMs": 200})))
+        self.assertEqual("Timeout", result["errorKind"])
+        for bad in ("200", -1, True, 1.5):
+            with self.subTest(bad):
+                result = json.loads(code_exec.run_json(json.dumps({"code": "1", "timeoutMs": bad})))
+                self.assertEqual("InvalidRequest", result["errorKind"])
+
+    def test_lowered_recursion_limit_still_succeeds(self):
+        code = "import sys, inspect\nsys.setrecursionlimit(len(inspect.stack()) + 20)\n7"
+        result = code_exec.run(code, timeout_ms=5000)
+        self.assertTrue(result["success"], result)
+        self.assertEqual("7", result["value"])
+
+    def test_nested_run_reports_its_own_budget(self):
+        code = "import code_exec\ncode_exec.run('while True: pass', timeout_ms=200)['error'].splitlines()[0]"
+        result = code_exec.run(code, timeout_ms=5000)
+        self.assertTrue(result["success"], result)
+        self.assertIn("200 ms", result["value"])
+
+    def test_deep_recursion_is_a_runtime_error(self):
+        result = code_exec.run("def f(n):\n    return f(n + 1)\nf(0)")
+        self.assertEqual("Runtime", result["errorKind"])
+        self.assertTrue(result["error"].startswith("RecursionError"), result["error"])
+        self.assertIn("frame(s) left out", result["error"])
 
 
 if __name__ == "__main__":
