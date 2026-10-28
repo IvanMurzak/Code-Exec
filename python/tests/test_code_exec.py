@@ -4,6 +4,7 @@ import base64
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -430,6 +431,101 @@ class TimeBudgetTests(unittest.TestCase):
         self.assertEqual("Runtime", result["errorKind"])
         self.assertTrue(result["error"].startswith("RecursionError"), result["error"])
         self.assertIn("frame(s) left out", result["error"])
+
+
+CAPPED = runner._CAPPED  # Python 3.12+ raise RecursionError before the C stack runs out: no cap there
+
+
+class RecursionLimitCapTests(unittest.TestCase):
+    """Spec section 4: on Python < 3.12 a snippet cannot raise the recursion limit past the host's cap."""
+
+    def setUp(self):
+        self.addCleanup(code_exec.set_max_recursion_limit, runner.MAX_RECURSION_LIMIT)
+
+    def warnings(self, result):
+        return [entry["message"] for entry in result["logs"] if entry["level"] == "warning"]
+
+    def test_raised_limit_and_c_recursion_do_not_end_the_host(self):
+        # A child process: without the cap this ends the interpreter (3.11: a C stack overflow) before any assertion.
+        code = "import sys\nsys.setrecursionlimit(1000000)\nx = []\nfor _ in range(300000):\n    x = [x]\nlen(repr(x))"
+        script = "import json, sys\nsys.path.insert(0, %r)\nimport code_exec\nprint(json.dumps(code_exec.run(%r)))" % (
+            os.path.join(ROOT, "python"), code)
+        child = subprocess.run([sys.executable, "-B", "-c", script], capture_output=True, text=True, timeout=120)
+        self.assertEqual(0, child.returncode, "the snippet ended the process: %r" % (child.stderr[-2000:],))
+        result = json.loads(child.stdout)
+        self.assertEqual("Runtime", result["errorKind"], result)
+        self.assertTrue(result["error"].startswith("RecursionError"), result["error"])
+        if CAPPED:
+            self.assertEqual(1, len(self.warnings(result)), result["logs"])
+
+    def test_limit_past_the_cap_is_clamped_with_a_warning_and_restored(self):
+        before, setter = sys.getrecursionlimit(), sys.setrecursionlimit
+        result = code_exec.run("import sys\nsys.setrecursionlimit(50000)\nsys.setrecursionlimit(60000)\nsys.getrecursionlimit()")
+        self.assertTrue(result["success"], result)
+        self.assertEqual(before, sys.getrecursionlimit())
+        self.assertIs(setter, sys.setrecursionlimit)
+        if not CAPPED:
+            self.assertEqual("60000", result["value"])
+            self.assertEqual([], self.warnings(result))
+            return
+        self.assertEqual(3000, runner.MAX_RECURSION_LIMIT)
+        self.assertEqual("3000", result["value"])
+        warnings = self.warnings(result)
+        self.assertEqual(1, len(warnings), result["logs"])  # one warning per run
+        self.assertIn("sys.setrecursionlimit(50000) was capped at 3000", warnings[0])
+
+    def test_limit_within_the_cap_and_bad_values_pass_through(self):
+        result = code_exec.run("import sys\nsys.setrecursionlimit(2500)\nsys.getrecursionlimit()")
+        self.assertEqual("2500", result["value"])
+        self.assertEqual([], self.warnings(result))
+        for code, error in (("sys.setrecursionlimit(-1)", "ValueError"), ("sys.setrecursionlimit('x')", "TypeError")):
+            with self.subTest(code):
+                result = code_exec.run("import sys\n" + code)
+                self.assertEqual("Runtime", result["errorKind"])
+                self.assertTrue(result["error"].startswith(error), result["error"])
+
+    @unittest.skipUnless(CAPPED, "the cap applies to Python < 3.12 only")
+    def test_host_sets_the_cap(self):
+        code = "import sys\nsys.setrecursionlimit(2500)\nsys.getrecursionlimit()"
+        code_exec.set_max_recursion_limit(2000)
+        self.assertEqual("2000", code_exec.run(code)["value"])
+        code_exec.set_max_recursion_limit(0)  # no cap
+        result = code_exec.run("import sys\nsys.setrecursionlimit(50000)\nsys.getrecursionlimit()")
+        self.assertEqual("50000", result["value"])
+        self.assertEqual([], self.warnings(result))
+        for bad in (-1, True, 1.5, "3000"):
+            with self.subTest(bad), self.assertRaises(ValueError):
+                code_exec.set_max_recursion_limit(bad)
+
+    @unittest.skipUnless(CAPPED, "the cap applies to Python < 3.12 only")
+    def test_index_objects_are_capped_and_a_kept_reference_caps_nothing_afterwards(self):
+        before, getter = sys.getrecursionlimit(), sys.getrecursionlimit
+        code = ("import sys\nclass Big:\n    def __index__(self):\n        return 50000\nsys.setrecursionlimit(Big())\n"
+                "kept = sys.setrecursionlimit\nsys.getrecursionlimit = lambda: 1\nsys.recursion_cap = kept\n"
+                "sys.getrecursionlimit()")
+        try:
+            result = code_exec.run(code)
+            self.assertEqual("1", result["value"])
+            self.assertIn("sys.setrecursionlimit(50000) was capped at 3000", self.warnings(result)[0])
+            self.assertIs(getter, sys.getrecursionlimit)
+            self.assertEqual(before, sys.getrecursionlimit())
+            sys.recursion_cap(before + 5000)  # the snippet's reference, called by the host after the run
+            self.assertEqual(before + 5000, sys.getrecursionlimit())
+        finally:
+            sys.setrecursionlimit(before)
+            vars(sys).pop("recursion_cap", None)
+
+    @unittest.skipUnless(CAPPED, "the cap applies to Python < 3.12 only")
+    def test_a_host_limit_above_the_cap_stays_available(self):
+        before = sys.getrecursionlimit()
+        sys.setrecursionlimit(5000)
+        try:
+            result = code_exec.run("import sys\nsys.setrecursionlimit(5000)\nsys.setrecursionlimit(6000)\nsys.getrecursionlimit()")
+            self.assertEqual("5000", result["value"])
+            self.assertIn("capped at 5000", self.warnings(result)[0])
+            self.assertEqual(5000, sys.getrecursionlimit())
+        finally:
+            sys.setrecursionlimit(before)
 
 
 if __name__ == "__main__":

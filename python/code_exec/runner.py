@@ -7,6 +7,7 @@ import collections
 import io
 import json
 import linecache
+import operator
 import os
 import sys
 import threading
@@ -40,6 +41,15 @@ _REFIRE_SECONDS = 0.1  # a snippet that catches the stop is stopped again this o
 _POLL_SECONDS = 0.02  # how often the watchdog looks whether the snippet ended
 _MARGIN_SECONDS = 0.05  # a snippet ending this long before its deadline was never stopped: no need to wait for the watchdog
 
+# Python < 3.12 has no C stack check: a snippet that raises the recursion limit and then recurses in C (repr / json.dumps
+# of a deeply nested list) overflows the C stack and ends the host. A snippet's sys.setrecursionlimit is capped there
+# (spec section 4). 3000 is conservative for Unreal's game thread (12 MB stack): in UnrealEditor 5.7 (Python 3.11.8)
+# every C recursion path measured survived at 4000; the costliest (a sort key that sorts again) ended it at 4500.
+MAX_RECURSION_LIMIT = 3000
+_CAPPED = sys.version_info < (3, 12)
+_max_recursion_limit = MAX_RECURSION_LIMIT
+_SET_RECURSION_LIMIT = sys.setrecursionlimit  # bound once: the runner restores limits with it, whatever a snippet replaced
+
 # JSON request field -> run() keyword argument (integers).
 _INT_FIELDS = {
     "timeoutMs": "timeout_ms",
@@ -52,6 +62,11 @@ _INT_FIELDS = {
 _value_converter = None
 
 
+def _is_count(value):
+    """An integer >= 0 (not a bool): what every limit and budget setting takes."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
 def set_value_converter(converter):
     """Host hook: ``converter(value) -> value | NotImplemented``. NotImplemented falls back to the default."""
     global _value_converter
@@ -61,9 +76,18 @@ def set_value_converter(converter):
 def set_default_timeout_ms(timeout_ms):
     """Host hook: the time budget of a request without ``timeout_ms`` / ``timeoutMs`` (default 120000); 0 = no bound."""
     global _default_timeout_ms
-    if isinstance(timeout_ms, bool) or not isinstance(timeout_ms, int) or timeout_ms < 0:
+    if not _is_count(timeout_ms):
         raise ValueError("timeout_ms must be an integer >= 0 (0 = no bound)")
     _default_timeout_ms = timeout_ms
+
+
+def set_max_recursion_limit(limit):
+    """Host hook: the highest recursion limit a snippet may set with ``sys.setrecursionlimit`` on Python < 3.12 (default
+    3000, a limit the host set itself above it stays allowed); 0 = no cap. Python 3.12+ never cap."""
+    global _max_recursion_limit
+    if not _is_count(limit):
+        raise ValueError("limit must be an integer >= 0 (0 = no cap)")
+    _max_recursion_limit = limit
 
 
 def run(code, include=(), include_root=None, imports=(), max_value_chars=MAX_VALUE_CHARS, max_log_chars=MAX_LOG_CHARS,
@@ -76,9 +100,9 @@ def run(code, include=(), include_root=None, imports=(), max_value_chars=MAX_VAL
     """
     result = _empty()
     limits = (max_value_chars, max_log_chars, max_log_line_chars, max_error_chars)
-    if any(isinstance(limit, bool) or not isinstance(limit, int) or limit < 0 for limit in limits):
+    if not all(_is_count(limit) for limit in limits):
         return _fail(result, "InvalidRequest", "output limits must be integers >= 0 (0 = no limit)")
-    if isinstance(timeout_ms, bool) or not isinstance(timeout_ms, int) or timeout_ms < 0:
+    if not _is_count(timeout_ms):
         return _fail(result, "InvalidRequest", "timeoutMs must be an integer >= 0 (0 = the host's default)")
     logs = _Logs(max_log_chars, max_log_line_chars)
     try:
@@ -155,6 +179,7 @@ def _execute(result, logs, code, include, include_root, imports, include_outside
         for name in imports:
             scope.setdefault(name.split(".")[0], __import__(name))  # like `import a.b`: binds the top package
         with redirect_stdout(out), redirect_stderr(err):
+            saved.cap_recursion_limit(logs)
             watchdog.start()
             for compiled in file_code:
                 exec(compiled, scope)
@@ -187,9 +212,28 @@ def _execute(result, logs, code, include, include_root, imports, include_outside
 def _make_room(saved):
     """Gives the runner back the host's recursion limit if the snippet lowered it: disarming needs a few frames."""
     try:
-        sys.setrecursionlimit(max(sys.getrecursionlimit(), saved.recursion_limit))
-    except BaseException:  # a snippet replaced sys.setrecursionlimit: the restore step reports nothing either
+        _SET_RECURSION_LIMIT(max(sys.getrecursionlimit(), saved.recursion_limit))
+    except BaseException:  # a snippet replaced sys.getrecursionlimit: the restore step reports nothing either
         pass
+
+
+class _RecursionCap:
+    """``sys.setrecursionlimit`` while a snippet runs on Python < 3.12: a limit past ``cap`` is set to ``cap``, with one
+    warning per run (spec section 4). It keeps an agent from ending the host by accident; it is no sandbox."""
+
+    def __init__(self, cap, logs):
+        self._cap, self._logs, self._warned = cap, logs, False
+        self.active = True  # a reference the snippet kept (`from sys import setrecursionlimit`) caps nothing after the run
+
+    def __call__(self, limit):
+        limit = operator.index(limit)  # what Python's own accepts (numpy integers too); anything else is its TypeError
+        if self.active and limit > self._cap:
+            if not self._warned:
+                self._warned = True
+                self._logs.add("warning", "sys.setrecursionlimit(%d) was capped at %d: on Python 3.11 and older a higher "
+                                          "limit can overflow the C stack and end the host" % (limit, self._cap))
+            limit = self._cap
+        _SET_RECURSION_LIMIT(limit)  # a limit too low raises as Python's own does
 
 
 class SnippetTimeout(BaseException):
@@ -388,6 +432,8 @@ class _HostState:
         self.bytecode = sys.dont_write_bytecode
         self.cwd = os.getcwd()
         self.recursion_limit = sys.getrecursionlimit()
+        self.set_recursion_limit, self.get_recursion_limit = sys.setrecursionlimit, sys.getrecursionlimit
+        self.cap = None
         self.modules = set(sys.modules)
         # The agent's own sources, so tracebacks show their lines (and never a same-named file elsewhere on sys.path).
         lines = dict(sources)
@@ -396,9 +442,15 @@ class _HostState:
         for path, source in lines.items():
             linecache.cache[path] = (len(source), None, source.splitlines(True), path)
 
+    def cap_recursion_limit(self, logs):
+        """Python < 3.12: the snippet's ``sys.setrecursionlimit`` sets at most the host's cap (restored by :meth:`restore`)."""
+        if _CAPPED and _max_recursion_limit:
+            self.cap = sys.setrecursionlimit = _RecursionCap(max(_max_recursion_limit, self.recursion_limit), logs)
+
     def restore(self, prefixes):
         steps = (
-            lambda: sys.setrecursionlimit(self.recursion_limit),  # first: the other steps need the stack
+            lambda: _SET_RECURSION_LIMIT(self.recursion_limit),  # first: the other steps need the stack
+            self._restore_recursion_functions,
             self._restore_path,
             lambda: sys.__setattr__("dont_write_bytecode", self.bytecode),
             lambda: os.chdir(self.cwd),
@@ -410,6 +462,11 @@ class _HostState:
                 step()
             except BaseException:  # nothing left to restore it from (the folder is gone, ...): keep restoring the rest
                 pass
+
+    def _restore_recursion_functions(self):
+        if self.cap is not None:
+            self.cap.active = False
+        sys.setrecursionlimit, sys.getrecursionlimit = self.set_recursion_limit, self.get_recursion_limit
 
     def _restore_path(self):
         if isinstance(getattr(sys, "path", None), list):

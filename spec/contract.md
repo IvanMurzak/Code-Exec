@@ -126,14 +126,16 @@ behind a read-only declared type, or a cast back to a mutable type, is not detec
 aborted from outside. So the runtime compiles guards into the agent's code (snippet, full source and includes), unless
 the host turns them off (`CodeRunnerOptions.ExecutionGuards`):
 
-- **Recursion.** Every method, local function, accessor, operator, constructor and block-bodied lambda, and the field
-  and property initializers of a class, check the stack every few calls: against the host's allowance
+- **Recursion.** Every method, local function, accessor, operator, constructor, lambda and anonymous method, and the
+  field and property initializers of a class, check the stack every few calls: against the host's allowance
   (`CodeRunnerOptions.MaxStackBytes`, 1 MiB by default, on the thread that runs the snippet, counted from where the run
   started) and the runtime's own margin (`RuntimeHelpers.EnsureSufficientExecutionStack`, every thread). Past the
   allowance or close to the limit the run stops with a `Runtime` error
   `System.InsufficientExecutionStackException: Recursion too deep: ...`, before a stack overflow could end the host.
-  Not guarded: expression-bodied lambdas (they may be expression trees) and members the compiler generates (a record's
-  `ToString`); recursion that runs only through them is not caught.
+  An expression-bodied lambda gets the check when it is a delegate (`Func<int, int> f = n => ... f(n - 1)`); not when it
+  is an expression tree, sits inside one, inside a query expression or inside an interpolation hole, or when its file has
+  a compile error. Not guarded either: members the compiler generates (a record's `ToString`). Recursion that runs only
+  through those is not caught.
 - **Time.** Every loop iteration (`while`, `do`, `for`, `foreach`) and every `goto` counts down and, every few
   iterations, reads the clock (every iteration while iterations are slow); so do the calls above. Once `timeoutMs` is
   spent, the run stops with `Timeout`: `System.TimeoutException: The snippet ran longer than its time budget of N ms
@@ -173,9 +175,17 @@ the host turns them off (`CodeRunnerOptions.ExecutionGuards`):
   it). It needs `ctypes` (`PyThreadState_SetAsyncExc`); without it
   the budget is not enforced. The stop is disarmed before the runner returns: none reaches the host afterwards.
   Threads the snippet started are not stopped.
-- **Recursion** ends with Python's own `RecursionError` (`Runtime`) at the interpreter's recursion limit. A snippet that
-  raises that limit (`sys.setrecursionlimit`) can still overflow the C stack through C-level recursion (`repr` /
-  `json.dumps` of a deeply nested list) on Python 3.11 and older, which ends the host; 3.12+ raise `RecursionError`.
+- **Recursion** ends with Python's own `RecursionError` (`Runtime`) at the interpreter's recursion limit. Python 3.11 and
+  older do not check the C stack: past a few thousand, a raised limit lets C-level recursion (`repr` / `json.dumps` of a
+  deeply nested list) overflow it, which ends the host. So on Python < 3.12 a snippet's (and its includes')
+  `sys.setrecursionlimit(n)` sets at most the host's cap (default `3000`, `code_exec.set_max_recursion_limit(n)`, `0` = no
+  cap; a limit the host set itself above the cap stays allowed). A capped call adds one `warning` log entry per run:
+  `sys.setrecursionlimit(N) was capped at C: on Python 3.11 and older a higher limit can overflow the C stack and end the
+  host`. The default suits hosts with an 8–12 MB stack (Unreal's game thread, Linux main threads); a host with a smaller
+  one (Windows `python.exe`: 2 MB) should lower it. The cap guards against accidents, not against a snippet that sets out
+  to get around it; modules the host lists in `imports` are not capped. Python 3.12+ check the C stack themselves
+  (`RecursionError` for most C-level recursion) and are not capped. The recursion limit, `sys.setrecursionlimit` and
+  `sys.getrecursionlimit` are restored after the run.
 - `value` conversion: `None` → null; `str`, `int`, `float`, `bool` → their `str()`; `dict` / `list` / `tuple` →
   JSON when serializable; anything else → `str()` (hosts may plug a converter, e.g. Unreal objects → path).
 
@@ -210,7 +220,8 @@ Lengths are in characters: UTF-16 code units in C#, code points in Python. A lim
   (`Recursion too deep`) before a stack overflow and with `Timeout` once `timeoutMs` is spent, also in synchronous code
   on the main thread; Python stops with `Timeout` through a watchdog (§4). `timeoutMs` applies to both runtimes; `0`
   means the host's default (120000), a negative value is `InvalidRequest`. Full-source mode gets the request's `usings`
-  and auto-import, and `CE0003` when names stay unresolved (§3.2).
+  and auto-import, and `CE0003` when names stay unresolved (§3.2). C#: expression-bodied lambdas that are delegates are
+  guarded too (§3.6). Python < 3.12: a snippet's `sys.setrecursionlimit` is capped (default 3000) with a warning (§4).
 
 - **v0.3.1** — C#: `static readonly` fields of immutable types are not static state (§3.5). Python is unchanged.
 - **v0.3** — output limits (§6): request fields `maxValueChars`, `maxLogChars`, `maxLogLineChars`, `maxErrorChars`
