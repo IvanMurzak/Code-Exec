@@ -125,13 +125,14 @@ namespace com.IvanMurzak.CodeExec.Roslyn
         /// <summary>
         /// Full-source code with the request's usings in front (spec §3.2: never the host's defaults), each mapped to its
         /// index like the snippet's (§3.4), the code to its own lines. <paramref name="importable"/> is false when the code
-        /// starts with what must precede every using (`extern alias`, `global using`): then it stays verbatim.
+        /// starts with what must precede every using (`#define`, `extern alias`, `global using`): then it stays verbatim.
         /// </summary>
         static SyntaxTree FullSource(string code, IReadOnlyList<string> usings, out bool importable)
         {
             var verbatim = Parse(code, SnippetFile);
             var root = verbatim.GetCompilationUnitRoot();
-            importable = root.Externs.Count == 0 && !root.Usings.Any(u => u.GetFirstToken().IsKind(SyntaxKind.GlobalKeyword));
+            importable = root.Externs.Count == 0 && !root.Usings.Any(u => u.GetFirstToken().IsKind(SyntaxKind.GlobalKeyword))
+                && !root.GetLeadingTrivia().Any(t => t.IsKind(SyntaxKind.DefineDirectiveTrivia) || t.IsKind(SyntaxKind.UndefDirectiveTrivia));
             if (!importable || usings.Count == 0)
                 return verbatim;
             var sb = new StringBuilder();

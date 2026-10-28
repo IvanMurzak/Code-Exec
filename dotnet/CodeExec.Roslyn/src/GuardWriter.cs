@@ -5,6 +5,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -24,6 +25,10 @@ namespace com.IvanMurzak.CodeExec.Roslyn
     internal static class GuardWriter
     {
         const string CounterPrefix = "__codeExecLoop";
+        const string InitPrefix = "__codeExecInit";
+
+        // Guard fields of partial classes must not collide across trees: a process-wide counter names them.
+        static int _initFields;
 
         /// <summary>
         /// Text inserted at <see cref="Position"/> (after removing <see cref="Remove"/> characters there), its line mapped like
@@ -53,8 +58,8 @@ namespace com.IvanMurzak.CodeExec.Roslyn
         public static SyntaxTree Write(SyntaxTree tree)
         {
             var root = tree.GetRoot();
-            if (tree.GetDiagnostics().Any(d => d.Severity == DiagnosticSeverity.Error))
-                return tree; // broken code: report its own errors, untouched
+            if (tree.GetDiagnostics().Any(d => d.Severity == DiagnosticSeverity.Error) || tree.FilePath.IndexOf('"') >= 0)
+                return tree; // broken code reports its own errors, untouched; a `"` cannot be written in a #line directive
             var edits = new List<Edit>();
             foreach (var node in root.DescendantNodes())
             {
@@ -106,7 +111,7 @@ namespace com.IvanMurzak.CodeExec.Roslyn
                 case GotoStatementSyntax jump:
                     Wrap(jump, ExecutionGuard.JumpCheck, jump.SpanStart, edits);
                     break;
-                case CatchClauseSyntax handler:
+                case CatchClauseSyntax handler when CatchesGuardStops(handler):
                     if (handler.Filter != null)
                     {
                         var filter = handler.Filter.FilterExpression;
@@ -151,7 +156,57 @@ namespace com.IvanMurzak.CodeExec.Roslyn
                 case AnonymousMethodExpressionSyntax method:
                     Function(method.Block, null, default, false, edits);
                     break;
+                case TypeDeclarationSyntax type when type.IsKind(SyntaxKind.ClassDeclaration) || type.IsKind(SyntaxKind.RecordDeclaration):
+                    Initializers(type, edits);
+                    break;
             }
+        }
+
+        /// <summary>
+        /// Field and property initializers run before any constructor body (and with no constructor at all): a class with
+        /// them gets a first field of its own whose initializer runs the call check (static ones a static field).
+        /// </summary>
+        static void Initializers(TypeDeclarationSyntax type, List<Edit> edits)
+        {
+            bool instance = false, shared = false;
+            foreach (var member in type.Members)
+            {
+                bool initialized;
+                if (member is BaseFieldDeclarationSyntax field)
+                    initialized = !field.Modifiers.Any(SyntaxKind.ConstKeyword) && field.Declaration.Variables.Any(v => v.Initializer != null);
+                else
+                    initialized = member is PropertyDeclarationSyntax property && property.Initializer != null;
+                if (!initialized)
+                    continue;
+                if (member.Modifiers.Any(SyntaxKind.StaticKeyword))
+                    shared = true;
+                else
+                    instance = true;
+            }
+            var at = type.OpenBraceToken;
+            if (at.IsMissing)
+                return;
+            if (shared)
+                edits.Add(new Edit(at.Span.End, InitField(true), at.SpanStart, edits.Count));
+            if (instance && !type.Modifiers.Any(SyntaxKind.StaticKeyword))
+                edits.Add(new Edit(at.Span.End, InitField(false), at.SpanStart, edits.Count));
+        }
+
+        static string InitField(bool isStatic) =>
+            "private " + (isStatic ? "static " : "") + "readonly bool " + InitPrefix + Interlocked.Increment(ref _initFields) + " = " + ExecutionGuard.InitCheck + ";";
+
+        /// <summary>
+        /// Whether a catch clause can catch the guard's stops (<c>TimeoutException</c>, <c>InsufficientExecutionStackException</c>):
+        /// no declaration, or one of their types or base types. Only those get the filter.
+        /// </summary>
+        static bool CatchesGuardStops(CatchClauseSyntax handler)
+        {
+            var type = handler.Declaration?.Type;
+            if (type == null)
+                return true;
+            var name = type is QualifiedNameSyntax qualified ? qualified.Right : type is AliasQualifiedNameSyntax alias ? alias.Name : type;
+            var text = (name as IdentifierNameSyntax)?.Identifier.ValueText;
+            return text == "Exception" || text == "SystemException" || text == "TimeoutException" || text == "InsufficientExecutionStackException";
         }
 
         /// <summary><c>{ int counter = N; loop }</c>, the body starting with the counter's check.</summary>
@@ -198,7 +253,10 @@ namespace com.IvanMurzak.CodeExec.Roslyn
             edits.Add(new Edit(semicolon.Span.End, "} }", semicolon.Span.End, edits.Count, closer: true));
         }
 
-        /// <summary>Whether <c>=> expr</c> of this signature is a value: not <c>void</c>, not an <c>async Task</c> / <c>ValueTask</c>.</summary>
+        /// <summary>
+        /// Whether <c>=> expr</c> of this signature is a value: not <c>void</c>; for <c>async</c>, only a generic task type
+        /// (<c>Task&lt;T&gt;</c>, <c>UniTask&lt;T&gt;</c>): every async method without a value returns a non-generic one.
+        /// </summary>
         static bool ReturnsValue(TypeSyntax type, SyntaxTokenList modifiers)
         {
             if (type is PredefinedTypeSyntax predefined && predefined.Keyword.IsKind(SyntaxKind.VoidKeyword))
@@ -206,7 +264,7 @@ namespace com.IvanMurzak.CodeExec.Roslyn
             if (!modifiers.Any(SyntaxKind.AsyncKeyword))
                 return true;
             var name = type is QualifiedNameSyntax qualified ? qualified.Right : type is AliasQualifiedNameSyntax alias ? alias.Name : type;
-            return !(name is IdentifierNameSyntax identifier && (identifier.Identifier.ValueText == "Task" || identifier.Identifier.ValueText == "ValueTask"));
+            return name is GenericNameSyntax;
         }
 
         /// <summary>A directive that maps the next line like <paramref name="position"/> is mapped (or hides it).</summary>
@@ -217,9 +275,9 @@ namespace com.IvanMurzak.CodeExec.Roslyn
                 sb.Append("#line hidden\n");
                 return;
             }
+            // The file name is taken verbatim (no escapes); Write skips trees whose path holds a `"`.
             var mapped = tree.GetMappedLineSpan(new TextSpan(position, 0));
-            sb.Append("#line ").Append(mapped.StartLinePosition.Line + 1).Append(" \"")
-                .Append(mapped.Path.Replace("\\", "\\\\").Replace("\"", "\\\"")).Append("\"\n");
+            sb.Append("#line ").Append(mapped.StartLinePosition.Line + 1).Append(" \"").Append(mapped.Path).Append("\"\n");
         }
     }
 }

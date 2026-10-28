@@ -126,18 +126,24 @@ behind a read-only declared type, or a cast back to a mutable type, is not detec
 aborted from outside. So the runtime compiles guards into the agent's code (snippet, full source and includes), unless
 the host turns them off (`CodeRunnerOptions.ExecutionGuards`):
 
-- **Recursion.** Every method, local function, accessor, operator, constructor and block-bodied lambda checks the
-  stack every few calls (`RuntimeHelpers.EnsureSufficientExecutionStack`). Close to the limit the run stops with a
-  `Runtime` error `System.InsufficientExecutionStackException: Recursion too deep: ...`, before a stack overflow could
-  end the host. Expression-bodied lambdas are not guarded (they may be expression trees): recursion that runs only
-  through them is not caught.
+- **Recursion.** Every method, local function, accessor, operator, constructor and block-bodied lambda, and the field
+  and property initializers of a class, check the stack every few calls (`RuntimeHelpers.EnsureSufficientExecutionStack`).
+  Close to the limit the run stops with a `Runtime` error
+  `System.InsufficientExecutionStackException: Recursion too deep: ...`, before a stack overflow could end the host.
+  Not guarded: expression-bodied lambdas (they may be expression trees) and members the compiler generates (a record's
+  `ToString`); recursion that runs only through them is not caught.
 - **Time.** Every loop iteration (`while`, `do`, `for`, `foreach`) and every `goto` counts down and, every few
   iterations, reads the clock (every iteration while iterations are slow); so do the calls above. Once `timeoutMs` is
   spent, the run stops with `Timeout`: `System.TimeoutException: The snippet ran longer than its time budget of N ms
   (timeoutMs) and was stopped.`, with the frame where it was (`snippet.cs:line N`). Code that blocks inside a host or
   framework call (`Thread.Sleep`, a lock, an engine call that never returns) is stopped only when the call returns.
-- **Once stopped**, every further check throws again and the agent's own `catch` clauses do not catch (a filter is
-  added to each), so the stop reaches the runtime; `finally` blocks still run.
+- **Once stopped**, every further check throws again, and the agent's `catch` clauses that could catch the stop (no
+  type, `Exception`, `SystemException` or the stop's own type) get a filter that lets it pass, so it reaches the runtime;
+  `finally` blocks still run. That filter makes a few invalid programs compile (a later `catch` that an earlier
+  catch-all would hide: `CS0160`).
+- **After the run.** A run that finished lifts the time budget: callbacks it left behind (events, stored delegates)
+  keep only the stack check. A timed-out run keeps its stop, so what still runs of it (an asynchronous continuation,
+  a thread it started) stops at its next check; on a host that cannot unload (Mono), its assembly is not reused.
 - The guards change no line or column the agent sees (diagnostics, stack frames). They cost about one countdown per
   loop iteration and per call: on .NET 8 about 1 ns per iteration and 1–7 ns per call of the snippet's own methods.
 
@@ -161,7 +167,8 @@ the host turns them off (`CodeRunnerOptions.ExecutionGuards`):
   longer than its time budget of N ms (timeoutMs) and was stopped.` plus the snippet's frames. Python delivers it
   between bytecodes: pure Python loops stop; a call into C (`time.sleep`, an engine call) finishes first, and a snippet
   that catches `BaseException` in its loop is not stopped. It needs `ctypes` (`PyThreadState_SetAsyncExc`); without it
-  the budget is not enforced. The stop is disarmed before the runner returns: none ever reaches the host.
+  the budget is not enforced. The stop is disarmed before the runner returns: none reaches the host afterwards.
+  Threads the snippet started are not stopped.
 - **Recursion** ends with Python's own `RecursionError` (`Runtime`) at the interpreter's recursion limit. A snippet that
   raises that limit (`sys.setrecursionlimit`) can still overflow the C stack through C-level recursion (`repr` /
   `json.dumps` of a deeply nested list) on Python 3.11 and older, which ends the host; 3.12+ raise `RecursionError`.

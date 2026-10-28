@@ -352,7 +352,7 @@ class RobustnessTests(unittest.TestCase):
         self.assertIn("not a .py file", result["error"])
 
 
-@unittest.skipIf(runner.ctypes is None, "no ctypes: the time budget is not enforced")
+@unittest.skipIf(runner._SET_ASYNC_EXC is None, "no ctypes: the time budget is not enforced")
 class TimeBudgetTests(unittest.TestCase):
     """Spec section 4: a snippet still running when its time budget is spent is stopped with a Timeout error."""
 
@@ -410,6 +410,18 @@ class TimeBudgetTests(unittest.TestCase):
             with self.subTest(bad):
                 result = json.loads(code_exec.run_json(json.dumps({"code": "1", "timeoutMs": bad})))
                 self.assertEqual("InvalidRequest", result["errorKind"])
+
+    def test_lowered_recursion_limit_still_succeeds(self):
+        code = "import sys, inspect\nsys.setrecursionlimit(len(inspect.stack()) + 8)\n7"
+        result = code_exec.run(code, timeout_ms=5000)
+        self.assertTrue(result["success"], result)
+        self.assertEqual("7", result["value"])
+
+    def test_nested_run_reports_its_own_budget(self):
+        code = "import code_exec\ncode_exec.run('while True: pass', timeout_ms=200)['error'].splitlines()[0]"
+        result = code_exec.run(code, timeout_ms=5000)
+        self.assertTrue(result["success"], result)
+        self.assertIn("200 ms", result["value"])
 
     def test_deep_recursion_is_a_runtime_error(self):
         result = code_exec.run("def f(n):\n    return f(n + 1)\nf(0)")

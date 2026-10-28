@@ -15,10 +15,12 @@ import tokenize
 import traceback
 from contextlib import redirect_stderr, redirect_stdout
 
-try:
+try:  # bound once: a snippet that patches ctypes cannot break disarming
     import ctypes
-except ImportError:  # an embedded interpreter without ctypes: no watchdog, the time budget is not enforced
-    ctypes = None
+    _SET_ASYNC_EXC = ctypes.pythonapi.PyThreadState_SetAsyncExc
+    _THREAD_ID, _PY_OBJECT = ctypes.c_ulong, ctypes.py_object
+except (ImportError, AttributeError):  # no ctypes / no pythonapi (embedded builds): the time budget is not enforced
+    _SET_ASYNC_EXC = None
 
 SNIPPET_FILE = "snippet.py"
 
@@ -35,6 +37,8 @@ _MAX_CAUSES = 5  # chained exceptions (__cause__ / __context__) reported after t
 TIMEOUT_MS = 120000
 _default_timeout_ms = TIMEOUT_MS
 _REFIRE_SECONDS = 0.1  # a snippet that catches the stop is stopped again this often
+_POLL_SECONDS = 0.02  # how often the watchdog looks whether the snippet ended
+_MARGIN_SECONDS = 0.05  # a snippet ending this long before its deadline was never stopped: no need to wait for the watchdog
 
 # JSON request field -> run() keyword argument (integers).
 _INT_FIELDS = {
@@ -156,6 +160,7 @@ def _execute(result, logs, code, include, include_root, imports, include_outside
                 exec(compiled, scope)
             exec(body, scope)
             value = eval(tail, scope) if tail is not None else None
+            _make_room(saved)
             watchdog.stop()
         result["value"] = _convert(value)
         result["success"] = True
@@ -168,11 +173,13 @@ def _execute(result, logs, code, include, include_root, imports, include_outside
         except BaseException:  # the traceback itself cannot be read
             result["error"] = "%s: %s" % (type(error).__name__, _message(error))
     finally:
-        _make_room(saved)
-        watchdog.stop()
-        out.flush()
-        err.flush()
-        saved.restore(prefixes)
+        try:
+            _make_room(saved)
+            watchdog.stop()
+        finally:
+            out.flush()
+            err.flush()
+            saved.restore(prefixes)
     result["executeMs"] = _ms(executing)
     return result
 
@@ -187,60 +194,69 @@ def _make_room(saved):
 
 class SnippetTimeout(BaseException):
     """Raised in the snippet's thread when its time budget is spent. A ``BaseException``: ``except Exception`` in the
-    snippet does not swallow it."""
+    snippet does not swallow it. Each run raises its own subclass, which knows that run's budget."""
 
-    budget_ms = 0  # of the run being stopped (one run at a time)
+    budget_ms = 0
 
     def __str__(self):
-        return "The snippet ran longer than its time budget of %d ms (timeoutMs) and was stopped." % SnippetTimeout.budget_ms
+        return "The snippet ran longer than its time budget of %d ms (timeoutMs) and was stopped." % type(self).budget_ms
 
 
 class _Watchdog:
     """Stops a snippet that outruns its time budget: a timer thread raises :class:`SnippetTimeout` in the snippet's thread
     (``PyThreadState_SetAsyncExc``), again every ``_REFIRE_SECONDS`` while the snippet catches it. Python delivers it
     between bytecodes, so pure Python loops stop; a call into C (``time.sleep``, an engine call) finishes first.
-    :meth:`stop` is retried until it went through and clears a stop not yet delivered: none reaches the host."""
+
+    No lock is ever taken in the snippet's thread (a stop delivered right after acquiring one would leave it held):
+    :meth:`stop` clears a flag, waits for the timer thread to end if it may have raised, then drops a stop raised but not
+    delivered yet. None reaches the host after the run."""
 
     def __init__(self, timeout_ms):
         self._timeout_ms = timeout_ms
-        self._lock = threading.Lock()
-        self._done = threading.Event()
         self._thread_id = None
-        self._armed = False
+        self._deadline = 0.0
+        self._armed = self._fired = self._exited = False
 
     def start(self):
-        if not self._timeout_ms or ctypes is None:
+        if not self._timeout_ms or _SET_ASYNC_EXC is None:
             return
-        SnippetTimeout.budget_ms = self._timeout_ms
+        stop = type("SnippetTimeout", (SnippetTimeout,), {"budget_ms": self._timeout_ms})
         self._thread_id = threading.get_ident()
+        self._deadline = time.monotonic() + self._timeout_ms / 1000.0
         self._armed = True
-        timer = threading.Thread(target=self._watch, name="code_exec watchdog", daemon=True)
-        timer.start()
+        threading.Thread(target=self._watch, args=(stop,), name="code_exec watchdog", daemon=True).start()
 
-    def _watch(self):
-        wait = self._timeout_ms / 1000.0
-        while not self._done.wait(wait):
-            with self._lock:
-                if not self._armed:
-                    return
-                _set_async_exc(self._thread_id, SnippetTimeout)
-            wait = _REFIRE_SECONDS
+    def _watch(self, stop):
+        try:
+            deadline = self._deadline
+            while self._armed:
+                now = time.monotonic()
+                if now < deadline:
+                    time.sleep(min(_POLL_SECONDS, deadline - now))
+                elif self._armed:
+                    self._fired = True
+                    _async_exc(self._thread_id, stop)
+                    deadline = now + _REFIRE_SECONDS
+        finally:
+            self._exited = True
 
     def stop(self):
-        self._armed = False  # first, before anything that could fail: the timer stops raising
         while self._thread_id is not None:
             try:
-                with self._lock:
-                    self._armed = False  # the timer never raises again
-                    self._done.set()
-                _set_async_exc(self._thread_id, None)  # a stop raised but not delivered yet is dropped
+                self._armed = False
+                # Before the deadline (and never fired) the timer cannot raise any more: it looks at the flag before it
+                # would. Otherwise wait until it is gone, then drop what it may have raised.
+                if self._fired or time.monotonic() >= self._deadline - _MARGIN_SECONDS:
+                    while not self._exited:
+                        time.sleep(0.001)
+                    _async_exc(self._thread_id, None)
                 self._thread_id = None
             except SnippetTimeout:  # delivered while disarming: disarm again
                 pass
 
 
-def _set_async_exc(thread_id, exception):
-    ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_ulong(thread_id), ctypes.py_object(exception) if exception else None)
+def _async_exc(thread_id, exception):
+    _SET_ASYNC_EXC(_THREAD_ID(thread_id), _PY_OBJECT(exception) if exception is not None else None)
 
 
 # JSON request field -> the type it must have when present (spec section 1: a wrong type is InvalidRequest).

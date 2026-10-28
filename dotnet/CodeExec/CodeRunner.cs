@@ -560,6 +560,16 @@ namespace com.IvanMurzak.CodeExec
             }
         }
 
+        /// <summary>A loaded entry (hosts that cannot unload) is not reused: the next identical request compiles afresh.</summary>
+        void Forget(CacheEntry entry)
+        {
+            lock (_cacheLock)
+            {
+                if (_loaded.TryGetValue(entry.Key, out var loaded) && loaded == entry)
+                    _loaded.Remove(entry.Key);
+            }
+        }
+
         CacheEntry? FromCache(string key)
         {
             lock (_cacheLock)
@@ -659,6 +669,24 @@ namespace com.IvanMurzak.CodeExec
                     ExecutionGuard.Arm(_guard, budgetMs);
             }
 
+            /// <summary>
+            /// After the run: a finished one lifts the time budget (callbacks the snippet left behind run on, still with the
+            /// stack check). A timed-out one keeps its stop for whatever still runs, and on a host that cannot unload, its
+            /// assembly is never reused, so no later run re-arms that guard.
+            /// </summary>
+            void Disarm()
+            {
+                if (_guard == null)
+                    return;
+                if (_errorKind == ErrorKind.Timeout)
+                {
+                    _runner.Forget(_prepared.Entry!);
+                    return;
+                }
+                try { ExecutionGuard.Arm(_guard, 0); }
+                catch (Exception) { } // a guard that cannot be reached: nothing to lift
+            }
+
             /// <summary>An exception of the snippet: <see cref="ErrorKind.Timeout"/> when the guard stopped it for time.</summary>
             public void Fail(Exception e)
             {
@@ -717,6 +745,7 @@ namespace com.IvanMurzak.CodeExec
                 }
                 finally
                 {
+                    Disarm();
                     for (var i = _captures.Count - 1; i >= 0; i--)
                         _captures[i].Dispose();
                     if (_runner._host.SupportsUnload)

@@ -36,7 +36,16 @@ namespace com.IvanMurzak.CodeExec
         /// <summary>The statement inserted at the start of the loop's body.</summary>
         public static string LoopCheck(string name) => "if (--" + name + " <= 0) " + name + " = global::" + TypeName + ".Loop();";
 
-        /// <summary>The condition added to every <c>catch</c> clause (combined with <c>&amp;&amp;</c> with its own filter).</summary>
+        /// <summary>
+        /// The initializer of a field put first in every class with field or property initializers (they run before any
+        /// constructor body).
+        /// </summary>
+        public const string InitCheck = "global::" + TypeName + ".Init()";
+
+        /// <summary>
+        /// The condition added to every <c>catch</c> clause that can catch a stop (no declaration, <c>Exception</c>,
+        /// <c>SystemException</c>, or the stop's own type), combined with <c>&amp;&amp;</c> with its own filter.
+        /// </summary>
         public const string CatchFilter = "global::" + TypeName + ".Running()";
 
         internal const int StoppedByTime = 1;
@@ -65,6 +74,13 @@ internal static class __CodeExecGuard
     }
 
     public static int Stopped() => _stopped;
+
+    public static bool Init()
+    {
+        if (--Calls <= 0)
+            Call();
+        return true;
+    }
 
     public static bool Running() => _stopped == 0;
 

@@ -17,6 +17,9 @@ namespace CodeExecTests
         [InlineData("Func<int, int> f = null;\nf = n => { return n == 0 ? 0 : 1 + f(n - 1); };\nf(10_000_000)")]
         [InlineData("static int P => P;\nP")]
         [InlineData("class Node { public int Depth(int n) => 1 + Depth(n + 1); }\nnew Node().Depth(0)")]
+        // Field and property initializers run before any constructor body.
+        [InlineData("class Node { Node next = new Node(); public Node() { } }\nnew Node();\n1")]
+        [InlineData("class Node { public Node Next { get; } = new Node(); }\nnew Node();\n1")]
         // A catch-all at every level must not swallow the stop and carry on recursing.
         [InlineData("int F(int n) { try { return 1 + F(n + 1); } catch (Exception) { return F(n + 1); } }\nF(0)")]
         public void DeepRecursionIsAnErrorNotACrash(string code)
@@ -82,6 +85,20 @@ namespace CodeExecTests
         }
 
         [Fact]
+        public void FullSourceStartingWithDefineStaysVerbatim()
+        {
+            var result = Fixtures.Runner().Execute(new ExecuteRequest
+            {
+                Code = "#define FOO\npublic static class E { public static int Run() {\n#if FOO\nreturn 1;\n#else\nreturn 0;\n#endif\n} }",
+                EntryType = "E",
+                EntryMethod = "Run",
+                Usings = new[] { "System.Text" },
+            });
+            Assert.True(result.Success, result.Error + " " + string.Join(" | ", result.Diagnostics));
+            Assert.Equal("1", result.Value);
+        }
+
+        [Fact]
         public void EndlessLoopInFullSourceModeTimesOut()
         {
             var result = Fixtures.Runner().Execute(new ExecuteRequest
@@ -122,19 +139,37 @@ namespace CodeExecTests
         }
 
         [Fact]
-        public void ReusedAssemblyIsReArmedOnEveryRun()
+        public void ReusedAssemblyIsReArmedOnEveryRunButATimedOutOneIsNotReused()
         {
-            // Mono path: one loaded assembly per request, the guard reset by each run.
+            // Mono path: one loaded assembly per request, the guard re-armed by each run (it is no static state)...
             var runner = Fixtures.Runner(configure: o => o.Host = new DefaultAssemblyHost());
-            for (var i = 0; i < 2; i++)
-                Assert.Equal(ErrorKind.Timeout, runner.Execute(new ExecuteRequest { Code = "while (true) { }", TimeoutMs = 150 }).ErrorKind);
             for (var i = 0; i < 3; i++)
             {
                 var result = runner.Execute(new ExecuteRequest { Code = "var s = 0;\nfor (var i = 0; i < 100; i++) s += i;\ns", TimeoutMs = 150 });
                 Assert.True(result.Success, result.Error);
                 Assert.Equal("4950", result.Value);
             }
-            Assert.Equal(2, runner.Stats.LoadedAssemblies); // the guard is no static state: both snippets stay cached
+            Assert.Equal(1, runner.Stats.LoadedAssemblies);
+            // ...but a timed-out one keeps its stop for whatever of it still runs: the next identical request loads a fresh copy.
+            for (var i = 0; i < 2; i++)
+                Assert.Equal(ErrorKind.Timeout, runner.Execute(new ExecuteRequest { Code = "while (true) { }", TimeoutMs = 150 }).ErrorKind);
+            Assert.Equal(3, runner.Stats.LoadedAssemblies);
+        }
+
+        [Fact]
+        public void FinishedRunLiftsTheBudgetForCallbacksItLeftBehind()
+        {
+            var runner = Fixtures.Runner(configure: o => o.Host = new DefaultAssemblyHost());
+            var result = runner.Execute(new ExecuteRequest
+            {
+                Code = "Func<int> f = () => { var s = 0; for (var i = 0; i < 10; i++) s += i; return s; };\nAppDomain.CurrentDomain.SetData(\"codeexec-callback\", f);\n1",
+                TimeoutMs = 100,
+            });
+            Assert.True(result.Success, result.Error);
+            System.Threading.Thread.Sleep(300); // past the run's budget
+            var callback = (Func<int>)AppDomain.CurrentDomain.GetData("codeexec-callback")!;
+            AppDomain.CurrentDomain.SetData("codeexec-callback", null);
+            Assert.Equal(45, callback());
         }
 
         [Fact]
@@ -161,6 +196,9 @@ namespace CodeExecTests
         [InlineData("class C { int v; public C(int v) => this.v = v; public static C operator +(C a, C b) => new C(a.v + b.v); public int this[int i] => v * i; public int V { get => v; set => v = value; } }\n(new C(2) + new C(3))[2]", "10")]
         [InlineData("Func<int, int> sq = delegate (int x) { return x * x; };\nsq(7)", "49")]
         [InlineData("int T() => throw new InvalidOperationException(\"t\");\ntry { return T(); } catch (InvalidOperationException e) { return e.Message; }", "t")]
+        [InlineData("using MyTask = System.Threading.Tasks.Task;\nasync MyTask F() => await Task.Yield();\nawait F();\n1", "1")]
+        [InlineData("class R { public int Y { get; set; } = 2; int z = 3; public int Sum => Y + z; }\nnew R().Sum", "5")]
+        [InlineData("static class S { static readonly int[] Table = { 1, 2 }; public static int First => Table[0]; }\nS.First", "1")]
         public async Task GuardedCodeKeepsItsMeaning(string code, string expected)
         {
             var result = await Fixtures.Runner().ExecuteAsync(new ExecuteRequest { Code = code });
