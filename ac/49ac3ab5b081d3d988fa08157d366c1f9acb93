@@ -1,0 +1,29 @@
+dotnet/CodeExec.Tests/GuardTests.cs
+  s_7bc72ecaebd05d::t_784dce7c1e27b0 53-61
+  s_7bc72ecaebd05d::t_8a0d3c42ebb962 52
+python/tests/test_code_exec.py
+  s_7bc72ecaebd05d::t_7a3fc3452385ca 365-370
+  s_7bc72ecaebd05d::t_35c4d08be82154 417
+dotnet/CodeExec/CodeRunner.cs
+  s_7bc72ecaebd05d::t_97f4f8615f8239 59-64,675,692
+dotnet/CodeExec/ExecutionGuard.cs
+  s_7bc72ecaebd05d::t_27de444aa5ec85 56-58,68-70,72,75,78,93,96-98,100-101,103-104,106-113,115-116,140,148-153
+spec/contract.md
+  s_7bc72ecaebd05d::t_f52a21c167d833 130-132,171-172
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ac49ac3ab5b081d3d988fa08157d366c1f9acb93",
+  "prompts": {},
+  "sessions": {
+    "s_7bc72ecaebd05d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "40274cb2-edf8-49ba-9a73-33b83cb5be53",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}
