@@ -59,8 +59,8 @@ ExecuteResult result = await runner.ExecuteAsync(new ExecuteRequest { Code = "Ap
 - `ValueConverter` turns the result into something that outlives the snippet (Unity: ReflectorNet JSON).
 - Execution guards ([§3.6](spec/contract.md#36-execution-guards)): runaway recursion stops with an error before a stack
   overflow could end the host, and loops stop with `Timeout` once the time budget is spent, also in synchronous code
-  on the main thread. Budget: `TimeoutMs` on the request, else `DefaultTimeoutMs` (120 s); `ExecutionGuards = false`
-  turns them off.
+  on the main thread. Budget: `TimeoutMs` on the request, else `DefaultTimeoutMs` (120 s); stack allowance
+  `MaxStackBytes` (1 MiB); `ExecutionGuards = false` turns them off.
 - Output is limited before it reaches the agent ([§6](spec/contract.md#6-output-limits)): a text value, the logs (first
   and last lines kept, 2k per line) and the error, 20k characters each by default (`MaxValueChars`, `MaxLogChars`,
   `MaxLogLineChars`, `MaxErrorChars` on the request; 0 = no limit). Includes stay inside `IncludeRoot` unless `AllowIncludeOutsideRoot`.

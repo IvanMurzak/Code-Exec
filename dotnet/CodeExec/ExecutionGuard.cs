@@ -53,9 +53,9 @@ namespace com.IvanMurzak.CodeExec
         /// <summary>
         /// The guard. C# 9, no usings, globally qualified names: it compiles beside any agent code on any host. The stack is
         /// checked on every 8th call (recursion grows the stack by at most 8 frames between checks, far below the margin
-        /// <c>EnsureSufficientExecutionStack</c> keeps): against the host's allowance, counted per thread from the run's
-        /// first check there (a deep stack is also slow to unwind: .NET 8 on Linux took minutes for an 8 MB one), and
-        /// against the runtime's own margin. The clock (<c>Environment.TickCount</c>, wrap-safe) on every 8th
+        /// <c>EnsureSufficientExecutionStack</c> keeps): on the thread that runs the snippet, against the host's allowance
+        /// counted from where the run started (a deep stack is also slow to unwind: .NET 8 on Linux took minutes for an
+        /// 8 MB one); everywhere, against the runtime's own margin. The clock (<c>Environment.TickCount</c>, wrap-safe) on every 8th
         /// call, and on a loop's first iteration, then after 2, 4, ... up to 256 iterations while checks are less than
         /// 10 ms apart, back to every iteration when they are not: slow iterations overshoot the budget by about 20 ms,
         /// fast ones pay one clock read per 256 iterations. The statics are shared by all threads: a race only shifts a
@@ -65,17 +65,18 @@ namespace com.IvanMurzak.CodeExec
 internal static class __CodeExecGuard
 {
     public static int Calls, Jumps;
-    static int _start, _last, _interval, _budget, _stopped, _maxStack, _generation;
-    [global::System.ThreadStatic] static int _threadGeneration;
-    [global::System.ThreadStatic] static long _threadBase;
+    static int _start, _last, _interval, _budget, _stopped, _maxStack, _baseThread;
+    static long _base;
 
-    public static void Arm(int budgetMs, int maxStackBytes)
+    public static unsafe void Arm(int budgetMs, int maxStackBytes)
     {
+        byte here;
+        _base = (long)&here; // the runner invokes the snippet right after, on this thread: its stack is counted from here
+        _baseThread = global::System.Environment.CurrentManagedThreadId;
         _budget = budgetMs;
         _maxStack = maxStackBytes;
         _start = _last = global::System.Environment.TickCount;
         _stopped = 0;
-        _generation++;
         Calls = Jumps = _interval = 1;
     }
 
@@ -95,12 +96,7 @@ internal static class __CodeExecGuard
         Calls = 8;
         byte here;
         var sp = (long)&here;
-        if (_threadGeneration != _generation)
-        {
-            _threadGeneration = _generation;
-            _threadBase = sp; // the first check of this run on this thread: depth is counted from here
-        }
-        var deep = _maxStack > 0 && _threadBase - sp > _maxStack;
+        var deep = _maxStack > 0 && _base - sp > _maxStack && global::System.Environment.CurrentManagedThreadId == _baseThread;
         if (!deep)
         {
             try
