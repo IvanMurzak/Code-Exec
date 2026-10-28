@@ -30,6 +30,22 @@ namespace CodeExecTests
             Assert.DoesNotContain(ExecutionGuard.TypeName, result.Error); // the guard's own frames are not the agent's
         }
 
+        // Recursion that runs only through expression-bodied lambdas (and anonymous methods). In a child process: an
+        // unguarded one ends the process with a stack overflow, which then fails this test instead of the whole run.
+        [Theory]
+        [InlineData("Func<int, int> f = null;\nf = n => n == 0 ? 0 : 1 + f(n - 1);\nf(10_000_000)")]
+        [InlineData("Func<int, int> f = null;\nf = (int n) => n == 0 ? 0 : 1 + f(n - 1);\nf(10_000_000)")]
+        [InlineData("Action<int> a = null;\na = n => a(n + 1);\na(0);")]
+        [InlineData("Func<int, Task<int>> g = null;\ng = async n => n == 0 ? 0 : 1 + await g(n - 1);\nawait g(10_000_000)")]
+        [InlineData("Func<int, int> f = null;\nf = delegate (int n) { return n == 0 ? 0 : 1 + f(n - 1); };\nf(10_000_000)")]
+        [InlineData("class C { public static Func<int, int> F = n => n == 0 ? 0 : 1 + F(n - 1); }\nC.F(10_000_000)")]
+        public void DeepRecursionThroughLambdasIsAnErrorNotACrash(string code)
+        {
+            var (kind, error) = ChildProcess.Execute(code);
+            Assert.True(kind == nameof(ErrorKind.Runtime), $"{kind}: {error}");
+            Assert.StartsWith("System.InsufficientExecutionStackException: Recursion too deep", error);
+        }
+
         [Fact]
         public void DeepRecursionInFullSourceModeAndIncludes()
         {
@@ -209,6 +225,20 @@ namespace CodeExecTests
         [InlineData("using MyTask = System.Threading.Tasks.Task;\nasync MyTask F() => await Task.Yield();\nawait F();\n1", "1")]
         [InlineData("class R { public int Y { get; set; } = 2; int z = 3; public int Sum => Y + z; }\nnew R().Sum", "5")]
         [InlineData("static class S { static readonly int[] Table = { 1, 2 }; public static int First => Table[0]; }\nS.First", "1")]
+        // Expression-bodied lambdas become blocks only when they are delegates: the value, the overload and the tree stay.
+        [InlineData("var list = new List<int>();\nAction<List<int>> add = l => l.Add(1);\nadd(list);\nlist.Count", "1")]
+        [InlineData("var d = new Dictionary<int, int> { [1] = 1 };\nAction<Dictionary<int, int>> drop = x => x.Remove(1);\ndrop(d);\nd.Count", "0")]
+        [InlineData("Func<int, bool> even = x => x % 2 == 0;\neven(4)", "True")]
+        [InlineData("Func<int, Func<int, int>> add = a => b => a + b;\nadd(2)(3)", "5")]
+        [InlineData("Func<Task<int>> t = async () => await Task.FromResult(5);\nawait t()", "5")]
+        [InlineData("Func<Task> t = async () => await Task.Yield();\nawait t();\n6", "6")]
+        [InlineData("System.Linq.Expressions.Expression<Func<Func<int>>> e = () => () => 7;\ne.Compile()()()", "7")]
+        [InlineData("new[] { 3, 1, 2 }.OrderBy(x => x).Select(x => x * 2).First()", "2")]
+        [InlineData("Task.Run(() => 8).Result", "8")]
+        [InlineData("Task.Run(() => Console.WriteLine()).Wait();\n9", "9")]
+        [InlineData("Func<int> t = () => throw new InvalidOperationException(\"t\");\ntry { return t(); } catch (InvalidOperationException e) { return e.Message; }", "t")]
+        [InlineData("Func<int, int> s = static x => x + 1;\ns(1)", "2")]
+        [InlineData("int[] arr = { 1 };\nFunc<int> one = () => arr[0];\n$\"{one()}{((Func<int>)(() => 2))()}\"", "12")]
         public async Task GuardedCodeKeepsItsMeaning(string code, string expected)
         {
             var result = await Fixtures.Runner().ExecuteAsync(new ExecuteRequest { Code = code });
@@ -224,12 +254,23 @@ namespace CodeExecTests
         [InlineData("int F() => undefinedThing; int G() { return undefinedThing; }", 1, 12)]
         [InlineData("int F() { return 1; } int G() { return 2; } var z = undefinedThing;", 1, 53)]
         [InlineData("try { } catch (Exception e) when (e != null) { } var q = undefinedThing;", 1, 58)]
+        [InlineData("Func<int, int> f = x => x + 1; var z = undefinedThing;", 1, 40)]
+        [InlineData("Func<int, int> f = x =>\n    x + 1;\nvar z = undefinedThing;", 3, 9)]
         public void DiagnosticsKeepTheAgentsCoordinatesAroundGuards(string code, int line, int column)
         {
             var result = Fixtures.Runner().Execute(new ExecuteRequest { Code = code, AutoImport = false });
             Assert.Equal(ErrorKind.Compile, result.ErrorKind);
             var d = Assert.Single(result.Diagnostics, x => x.Id == "CS0103" && x.Line == line && x.Column == column);
             Assert.Equal("snippet.cs", d.File);
+        }
+
+        [Fact]
+        public void StackFrameInAGuardedLambdaKeepsTheAgentsLine()
+        {
+            var result = Fixtures.Runner().Execute(new ExecuteRequest { Code = "var zero = 0;\nFunc<int, int> f = x =>\n    x / zero;\nf(1)" });
+            Assert.Equal(ErrorKind.Runtime, result.ErrorKind);
+            Assert.StartsWith("System.DivideByZeroException", result.Error);
+            Assert.Contains("snippet.cs:line 3", result.Error);
         }
 
         [Fact]

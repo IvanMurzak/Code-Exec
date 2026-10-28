@@ -10,6 +10,9 @@
     <RoslynVersion Condition="'$(RoslynVersion)' == ''">4.8.0</RoslynVersion>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
+    <!-- ChildProcess.Main: tests run snippets that could end the process in a child started from this assembly. -->
+    <OutputType>Exe</OutputType>
+    <GenerateProgramFile>false</GenerateProgramFile>
     <!-- Old Roslyn versions carry advisories that do not matter for a test host. -->
     <NoWarn>$(NoWarn);NU1902;NU1903;NU1608</NoWarn>
   </PropertyGroup>

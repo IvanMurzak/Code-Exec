@@ -78,6 +78,7 @@ code_exec.run_b64(base64_json_request)   # JSON in, JSON out: one string literal
 code_exec.run("print('x')", max_log_chars=0)   # the same limits as C# (JSON: maxLogChars, ...); 0 = no limit
 code_exec.run("while True: pass", timeout_ms=5000)   # stopped by a watchdog: errorKind Timeout (JSON: timeoutMs)
 code_exec.set_default_timeout_ms(60000)               # the budget of requests without one (default 120000; 0 = none)
+code_exec.set_max_recursion_limit(3000)               # Python < 3.12: the most a snippet's sys.setrecursionlimit sets (0 = no cap)
 ```
 
 ## Development

@@ -98,7 +98,7 @@ namespace com.IvanMurzak.CodeExec.Roslyn
                 {
                     if (trees[i].FilePath == ExecutionGuard.FileName)
                         continue;
-                    var guarded = GuardWriter.Write(trees[i]);
+                    var guarded = GuardWriter.Write(trees[i], compilation);
                     if (guarded == trees[i])
                         continue;
                     compilation = compilation.ReplaceSyntaxTree(trees[i], guarded);

@@ -15,8 +15,9 @@ namespace com.IvanMurzak.CodeExec.Roslyn
 {
     /// <summary>
     /// Adds the execution guard checks (<see cref="ExecutionGuard"/>, spec §3.6) to a syntax tree: the call check at the
-    /// start of every method, local function, accessor, operator, constructor and block-bodied lambda (expression bodies of
-    /// members become blocks; expression lambdas stay as they are, they may be expression trees); a counter before every
+    /// start of every method, local function, accessor, operator, constructor, lambda and anonymous method (expression bodies
+    /// become blocks; an expression lambda only when the semantic model says it is a delegate, never part of an expression
+    /// tree, and free of errors); a counter before every
     /// loop and its check at the start of the body; the jump check before every <c>goto</c>; the catch filter on every
     /// <c>catch</c>.
     /// Every inserted piece sits on lines of its own, followed by a <c>#line</c> directive and padding that put the agent's
@@ -54,17 +55,30 @@ namespace com.IvanMurzak.CodeExec.Roslyn
             public int Remove { get; }
         }
 
-        /// <summary>The guarded tree, or <paramref name="tree"/> itself when it has nothing to guard or does not parse.</summary>
-        public static SyntaxTree Write(SyntaxTree tree)
+        /// <summary>
+        /// The guarded tree, or <paramref name="tree"/> itself when it has nothing to guard or does not parse. Expression
+        /// lambdas are guarded only with a <paramref name="compilation"/> that holds <paramref name="tree"/>: it tells
+        /// delegates from expression trees and what they return (bound only when the tree has such a lambda).
+        /// </summary>
+        public static SyntaxTree Write(SyntaxTree tree, Compilation? compilation = null)
         {
             var root = tree.GetRoot();
             if (tree.GetDiagnostics().Any(d => d.Severity == DiagnosticSeverity.Error) || tree.FilePath.IndexOf('"') >= 0)
                 return tree; // broken code reports its own errors, untouched; a `"` cannot be written in a #line directive
             var edits = new List<Edit>();
+            SemanticModel? model = null;
             foreach (var node in root.DescendantNodes())
             {
                 var count = edits.Count;
-                Collect(node, edits);
+                if (node is LambdaExpressionSyntax lambda && lambda.Body is ExpressionSyntax body)
+                {
+                    if (compilation != null)
+                        ExpressionLambda(lambda, body, model ??= compilation.GetSemanticModel(tree), edits);
+                }
+                else
+                {
+                    Collect(node, edits);
+                }
                 if (edits.Count != count && node.Ancestors().Any(a => a is InterpolationSyntax))
                     edits.RemoveRange(count, edits.Count - count); // an interpolation hole may not span lines (C# < 11)
             }
@@ -241,6 +255,30 @@ namespace com.IvanMurzak.CodeExec.Roslyn
             var value = returnsValue && !(arrow.Expression is ThrowExpressionSyntax);
             edits.Add(new Edit(arrow.ArrowToken.SpanStart, "{ " + ExecutionGuard.CallCheck + (value ? " return" : ""), arrow.SpanStart, edits.Count, remove: arrow.ArrowToken.Span.Length));
             edits.Add(new Edit(semicolon.Span.End, "}", semicolon.Span.End, edits.Count, closer: true));
+        }
+
+        /// <summary>
+        /// <c>x => expr</c> becomes <c>x => { check; return expr; }</c> (<c>{ check; expr; }</c> without a value) when it is
+        /// a delegate: a block cannot be an expression tree, also not inside one (an enclosing lambda or query that is one).
+        /// Lambdas with errors stay as they are, so their diagnostics stay the agent's.
+        /// </summary>
+        static void ExpressionLambda(LambdaExpressionSyntax lambda, ExpressionSyntax body, SemanticModel model, List<Edit> edits)
+        {
+            foreach (var outer in lambda.AncestorsAndSelf())
+            {
+                if (outer is QueryExpressionSyntax)
+                    return;
+                if (outer is AnonymousFunctionExpressionSyntax function && model.GetTypeInfo(function).ConvertedType?.TypeKind != TypeKind.Delegate)
+                    return;
+            }
+            if (!(model.GetSymbolInfo(lambda).Symbol is IMethodSymbol method) || method.ReturnType.TypeKind == TypeKind.Error
+                || model.GetDiagnostics(lambda.Span).Any(d => d.Severity == DiagnosticSeverity.Error))
+                return;
+            // Every async lambda without a value returns a non-generic task type; `throw x;` is a statement.
+            var value = !method.ReturnsVoid && !(method.IsAsync && method.ReturnType is INamedTypeSymbol { IsGenericType: false })
+                && !(body is ThrowExpressionSyntax);
+            edits.Add(new Edit(body.SpanStart, "{ " + ExecutionGuard.CallCheck + (value ? " return" : ""), body.SpanStart, edits.Count));
+            edits.Add(new Edit(body.Span.End, "; }", body.Span.End, edits.Count, closer: true));
         }
 
         /// <summary><c>T P => expr;</c> becomes <c>T P { get { check; return expr; } }</c> (indexers alike).</summary>
