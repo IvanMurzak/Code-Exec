@@ -48,8 +48,7 @@ namespace com.IvanMurzak.CodeExec.Roslyn
             var importable = true; // auto-import can add usings to the agent's code (spec §3.3)
             if (request.EntryType != null)
             {
-                importable = FullSourceUsings(request.Code, request.Usings, out var source);
-                trees.Add(Parse(source, SnippetFile));
+                trees.Add(FullSource(request.Code, request.Usings, out importable));
                 entryType = request.EntryType;
                 entryMethod = request.EntryMethod ?? "Main";
             }
@@ -125,22 +124,20 @@ namespace com.IvanMurzak.CodeExec.Roslyn
 
         /// <summary>
         /// Full-source code with the request's usings in front (spec §3.2: never the host's defaults), each mapped to its
-        /// index like the snippet's (§3.4), the code to its own lines. False when the code starts with what must precede
-        /// every using (`extern alias`, `global using`): then it stays verbatim and nothing can be auto-imported.
+        /// index like the snippet's (§3.4), the code to its own lines. <paramref name="importable"/> is false when the code
+        /// starts with what must precede every using (`extern alias`, `global using`): then it stays verbatim.
         /// </summary>
-        static bool FullSourceUsings(string code, IReadOnlyList<string> usings, out string source)
+        static SyntaxTree FullSource(string code, IReadOnlyList<string> usings, out bool importable)
         {
-            source = code;
-            var root = CSharpSyntaxTree.ParseText(code, ParseOptions).GetCompilationUnitRoot();
-            if (root.Externs.Count > 0 || root.Usings.Any(u => u.GetFirstToken().IsKind(SyntaxKind.GlobalKeyword)))
-                return false;
-            if (usings.Count == 0)
-                return true;
+            var verbatim = Parse(code, SnippetFile);
+            var root = verbatim.GetCompilationUnitRoot();
+            importable = root.Externs.Count == 0 && !root.Usings.Any(u => u.GetFirstToken().IsKind(SyntaxKind.GlobalKeyword));
+            if (!importable || usings.Count == 0)
+                return verbatim;
             var sb = new StringBuilder();
             for (var i = 0; i < usings.Count; i++)
                 sb.Append("#line ").Append(i + 1).Append(" \"").Append(UsingsFile).Append("\"\nusing ").Append(usings[i]).Append(";\n");
-            source = sb.Append("#line 1 \"").Append(SnippetFile).Append("\"\n").Append(code).ToString();
-            return true;
+            return Parse(sb.Append("#line 1 \"").Append(SnippetFile).Append("\"\n").Append(code).ToString(), SnippetFile);
         }
 
         static ITypeSymbol? TypeAt(CSharpCompilation compilation, SyntaxTree tree, Microsoft.CodeAnalysis.Text.TextSpan span)

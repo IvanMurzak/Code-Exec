@@ -23,8 +23,6 @@ namespace com.IvanMurzak.CodeExec.Roslyn
     /// </summary>
     internal static class GuardWriter
     {
-        const string Enter = ExecutionGuard.CallCheck;
-        const string Running = ExecutionGuard.CatchFilter;
         const string CounterPrefix = "__codeExecLoop";
 
         /// <summary>
@@ -112,13 +110,13 @@ namespace com.IvanMurzak.CodeExec.Roslyn
                     if (handler.Filter != null)
                     {
                         var filter = handler.Filter.FilterExpression;
-                        edits.Add(new Edit(filter.SpanStart, Running + " && (", filter.SpanStart, edits.Count));
+                        edits.Add(new Edit(filter.SpanStart, ExecutionGuard.CatchFilter + " && (", filter.SpanStart, edits.Count));
                         edits.Add(new Edit(filter.Span.End, ")", filter.Span.End, edits.Count, closer: true));
                     }
                     else
                     {
                         var end = handler.Declaration?.Span.End ?? handler.CatchKeyword.Span.End;
-                        edits.Add(new Edit(end, "when (" + Running + ")", end, edits.Count));
+                        edits.Add(new Edit(end, "when (" + ExecutionGuard.CatchFilter + ")", end, edits.Count));
                     }
                     break;
                 case MethodDeclarationSyntax method:
@@ -179,14 +177,14 @@ namespace com.IvanMurzak.CodeExec.Roslyn
         {
             if (body != null)
             {
-                edits.Add(new Edit(body.OpenBraceToken.Span.End, Enter, body.OpenBraceToken.SpanStart, edits.Count));
+                edits.Add(new Edit(body.OpenBraceToken.Span.End, ExecutionGuard.CallCheck, body.OpenBraceToken.SpanStart, edits.Count));
                 return;
             }
             if (arrow == null || semicolon.IsMissing || semicolon.Span.Length == 0)
                 return;
             // `=> expr;` becomes `{ check; return expr; }` (`{ check; expr; }` without a value; `throw x;` is a statement).
             var value = returnsValue && !(arrow.Expression is ThrowExpressionSyntax);
-            edits.Add(new Edit(arrow.ArrowToken.SpanStart, "{ " + Enter + (value ? " return" : ""), arrow.SpanStart, edits.Count, remove: arrow.ArrowToken.Span.Length));
+            edits.Add(new Edit(arrow.ArrowToken.SpanStart, "{ " + ExecutionGuard.CallCheck + (value ? " return" : ""), arrow.SpanStart, edits.Count, remove: arrow.ArrowToken.Span.Length));
             edits.Add(new Edit(semicolon.Span.End, "}", semicolon.Span.End, edits.Count, closer: true));
         }
 
@@ -196,7 +194,7 @@ namespace com.IvanMurzak.CodeExec.Roslyn
             if (semicolon.IsMissing || semicolon.Span.Length == 0)
                 return;
             var value = !(arrow.Expression is ThrowExpressionSyntax);
-            edits.Add(new Edit(arrow.ArrowToken.SpanStart, "{ get { " + Enter + (value ? " return" : ""), arrow.SpanStart, edits.Count, remove: arrow.ArrowToken.Span.Length));
+            edits.Add(new Edit(arrow.ArrowToken.SpanStart, "{ get { " + ExecutionGuard.CallCheck + (value ? " return" : ""), arrow.SpanStart, edits.Count, remove: arrow.ArrowToken.Span.Length));
             edits.Add(new Edit(semicolon.Span.End, "} }", semicolon.Span.End, edits.Count, closer: true));
         }
 

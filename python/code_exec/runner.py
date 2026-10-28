@@ -37,7 +37,7 @@ _default_timeout_ms = TIMEOUT_MS
 _REFIRE_SECONDS = 0.1  # a snippet that catches the stop is stopped again this often
 
 # JSON request field -> run() keyword argument (integers).
-_LIMIT_FIELDS = {
+_INT_FIELDS = {
     "timeoutMs": "timeout_ms",
     "maxValueChars": "max_value_chars",
     "maxLogChars": "max_log_chars",
@@ -258,14 +258,14 @@ def run_json(payload):
     for field, kind in _FIELD_TYPES.items():
         if request.get(field) is not None and not isinstance(request[field], kind):
             return _invalid("%s must be a %s" % (field, kind.__name__))
-    limits = {name: request[field] for field, name in _LIMIT_FIELDS.items() if request.get(field) is not None}
+    numbers = {name: request[field] for field, name in _INT_FIELDS.items() if request.get(field) is not None}
     response = run(
         request.get("code", ""),
         include=request.get("include") or (),
         include_root=request.get("includeRoot"),
         imports=request.get("imports") or (),
         include_outside_root=request.get("includeOutsideRoot") is True,
-        **limits)
+        **numbers)
     try:
         return json.dumps(response, default=str)  # a host converter's odd value must not fail the response
     except Exception:  # non-string keys, a cycle, a str() that raises
