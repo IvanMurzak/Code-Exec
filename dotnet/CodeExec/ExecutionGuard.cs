@@ -53,7 +53,9 @@ namespace com.IvanMurzak.CodeExec
         /// <summary>
         /// The guard. C# 9, no usings, globally qualified names: it compiles beside any agent code on any host. The stack is
         /// checked on every 8th call (recursion grows the stack by at most 8 frames between checks, far below the margin
-        /// <c>EnsureSufficientExecutionStack</c> keeps), the clock (<c>Environment.TickCount</c>, wrap-safe) on every 8th
+        /// <c>EnsureSufficientExecutionStack</c> keeps): against the host's allowance, counted per thread from the run's
+        /// first check there (a deep stack is also slow to unwind: .NET 8 on Linux took minutes for an 8 MB one), and
+        /// against the runtime's own margin. The clock (<c>Environment.TickCount</c>, wrap-safe) on every 8th
         /// call, and on a loop's first iteration, then after 2, 4, ... up to 256 iterations while checks are less than
         /// 10 ms apart, back to every iteration when they are not: slow iterations overshoot the budget by about 20 ms,
         /// fast ones pay one clock read per 256 iterations. The statics are shared by all threads: a race only shifts a
@@ -63,13 +65,17 @@ namespace com.IvanMurzak.CodeExec
 internal static class __CodeExecGuard
 {
     public static int Calls, Jumps;
-    static int _start, _last, _interval, _budget, _stopped;
+    static int _start, _last, _interval, _budget, _stopped, _maxStack, _generation;
+    [global::System.ThreadStatic] static int _threadGeneration;
+    [global::System.ThreadStatic] static long _threadBase;
 
-    public static void Arm(int budgetMs)
+    public static void Arm(int budgetMs, int maxStackBytes)
     {
         _budget = budgetMs;
+        _maxStack = maxStackBytes;
         _start = _last = global::System.Environment.TickCount;
         _stopped = 0;
+        _generation++;
         Calls = Jumps = _interval = 1;
     }
 
@@ -84,18 +90,30 @@ internal static class __CodeExecGuard
 
     public static bool Running() => _stopped == 0;
 
-    public static void Call()
+    public static unsafe void Call()
     {
         Calls = 8;
-        try
+        byte here;
+        var sp = (long)&here;
+        if (_threadGeneration != _generation)
         {
-            global::System.Runtime.CompilerServices.RuntimeHelpers.EnsureSufficientExecutionStack();
+            _threadGeneration = _generation;
+            _threadBase = sp; // the first check of this run on this thread: depth is counted from here
         }
-        catch (global::System.InsufficientExecutionStackException)
+        var deep = _maxStack > 0 && _threadBase - sp > _maxStack;
+        if (!deep)
         {
-            if (_stopped == 0)
-                _stopped = 2;
+            try
+            {
+                global::System.Runtime.CompilerServices.RuntimeHelpers.EnsureSufficientExecutionStack();
+            }
+            catch (global::System.InsufficientExecutionStackException)
+            {
+                deep = true;
+            }
         }
+        if (deep && _stopped == 0)
+            _stopped = 2;
         Check();
     }
 
@@ -119,7 +137,7 @@ internal static class __CodeExecGuard
         Calls = Jumps = 0;
         if (_stopped == 1)
             throw new global::System.TimeoutException(""The snippet ran longer than its time budget of "" + _budget + "" ms (timeoutMs) and was stopped."");
-        throw new global::System.InsufficientExecutionStackException(""Recursion too deep: the call stack is nearly exhausted. The snippet was stopped before a stack overflow could end the host process; bound the recursion depth or use a loop."");
+        throw new global::System.InsufficientExecutionStackException(""Recursion too deep: the snippet used more than its stack allowance or the call stack is nearly exhausted. It was stopped before a stack overflow could end the host process; bound the recursion depth or use a loop."");
     }
 }
 ";
@@ -127,9 +145,12 @@ internal static class __CodeExecGuard
         /// <summary>The guard of a loaded snippet assembly, or null (compiled without guards).</summary>
         internal static Type? Find(Assembly assembly) => assembly.GetType(TypeName, throwOnError: false);
 
-        /// <summary>Starts the time budget (0 = none) for one run; resets a previous run's stop (reused assemblies).</summary>
-        internal static void Arm(Type guard, int budgetMs) =>
-            guard.GetMethod("Arm", BindingFlags.Public | BindingFlags.Static)!.Invoke(null, new object[] { budgetMs });
+        /// <summary>
+        /// Starts the time budget (0 = none) and the stack allowance (0 = only the runtime's own margin) for one run; resets
+        /// a previous run's stop (reused assemblies).
+        /// </summary>
+        internal static void Arm(Type guard, int budgetMs, int maxStackBytes) =>
+            guard.GetMethod("Arm", BindingFlags.Public | BindingFlags.Static)!.Invoke(null, new object[] { budgetMs, maxStackBytes });
 
         /// <summary><see cref="StoppedByTime"/>, 2 (stopped by the stack check) or 0 (not stopped).</summary>
         internal static int Stopped(Type guard) =>

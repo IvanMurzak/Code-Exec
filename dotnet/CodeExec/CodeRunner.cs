@@ -56,6 +56,12 @@ namespace com.IvanMurzak.CodeExec
         /// thread. On by default; costs a counter decrement per loop iteration and a stack check per call.
         /// </summary>
         public bool ExecutionGuards { get; set; } = true;
+
+        /// <summary>
+        /// With <see cref="ExecutionGuards"/>: how much stack a snippet may use on a thread before it stops as runaway
+        /// recursion, besides the runtime's own margin (spec §3.6). 0 = only that margin. Default 1 MiB.
+        /// </summary>
+        public int MaxStackBytes { get; set; } = 1024 * 1024;
     }
 
     public sealed class CodeRunnerStats
@@ -666,7 +672,7 @@ namespace com.IvanMurzak.CodeExec
             {
                 _guard = ExecutionGuard.Find(Loaded!.Assembly);
                 if (_guard != null)
-                    ExecutionGuard.Arm(_guard, budgetMs);
+                    ExecutionGuard.Arm(_guard, budgetMs, Math.Max(_runner._options.MaxStackBytes, 0));
             }
 
             /// <summary>
@@ -683,7 +689,7 @@ namespace com.IvanMurzak.CodeExec
                     _runner.Forget(_prepared.Entry!);
                     return;
                 }
-                try { ExecutionGuard.Arm(_guard, 0); }
+                try { ExecutionGuard.Arm(_guard, 0, Math.Max(_runner._options.MaxStackBytes, 0)); }
                 catch (Exception) { } // a guard that cannot be reached: nothing to lift
             }
 

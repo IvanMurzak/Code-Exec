@@ -127,7 +127,9 @@ aborted from outside. So the runtime compiles guards into the agent's code (snip
 the host turns them off (`CodeRunnerOptions.ExecutionGuards`):
 
 - **Recursion.** Every method, local function, accessor, operator, constructor and block-bodied lambda, and the field
-  and property initializers of a class, check the stack every few calls (`RuntimeHelpers.EnsureSufficientExecutionStack`).
+  and property initializers of a class, check the stack every few calls: against the host's allowance
+  (`CodeRunnerOptions.MaxStackBytes`, 1 MiB by default, counted per thread from the run's first check there) and the
+  runtime's own margin (`RuntimeHelpers.EnsureSufficientExecutionStack`).
   Close to the limit the run stops with a `Runtime` error
   `System.InsufficientExecutionStackException: Recursion too deep: ...`, before a stack overflow could end the host.
   Not guarded: expression-bodied lambdas (they may be expression trees) and members the compiler generates (a record's
@@ -166,7 +168,8 @@ the host turns them off (`CodeRunnerOptions.ExecutionGuards`):
   snippet's thread, and again every 100 ms while the snippet catches it: `Timeout`, `SnippetTimeout: The snippet ran
   longer than its time budget of N ms (timeoutMs) and was stopped.` plus the snippet's frames. Python delivers it
   between bytecodes: pure Python loops stop; a call into C (`time.sleep`, an engine call) finishes first, and a snippet
-  that catches `BaseException` in its loop is not stopped. It needs `ctypes` (`PyThreadState_SetAsyncExc`); without it
+  that catches `BaseException` in its loop is not stopped. Python 3.10 never looks for it in a loop whose body is only a
+  `try` statement (`while True: try: ... except ...`): such a loop is not stopped there (3.11+ stop it). It needs `ctypes` (`PyThreadState_SetAsyncExc`); without it
   the budget is not enforced. The stop is disarmed before the runner returns: none reaches the host afterwards.
   Threads the snippet started are not stopped.
 - **Recursion** ends with Python's own `RecursionError` (`Runtime`) at the interpreter's recursion limit. A snippet that

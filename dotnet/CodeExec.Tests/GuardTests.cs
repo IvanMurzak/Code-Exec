@@ -50,6 +50,16 @@ namespace CodeExecTests
         }
 
         [Fact]
+        public void HostStackAllowanceBoundsRecursion()
+        {
+            const string code = "int F(int n) => n == 0 ? 0 : 1 + F(n - 1);\nF(2000)";
+            Assert.Equal("2000", Fixtures.Runner().Execute(new ExecuteRequest { Code = code }).Value);
+            var bounded = Fixtures.Runner(configure: o => o.MaxStackBytes = 16 * 1024).Execute(new ExecuteRequest { Code = code });
+            Assert.Equal(ErrorKind.Runtime, bounded.ErrorKind);
+            Assert.Contains("Recursion too deep", bounded.Error);
+        }
+
+        [Fact]
         public void DeepRecursionOnASmallStackThread()
         {
             ExecuteResult? result = null;
