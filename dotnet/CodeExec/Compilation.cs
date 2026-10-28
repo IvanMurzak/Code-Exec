@@ -44,6 +44,12 @@ namespace com.IvanMurzak.CodeExec
         public string? EntryType { get; set; }
 
         public string? EntryMethod { get; set; }
+
+        /// <summary>
+        /// Add the execution guards (<see cref="ExecutionGuard"/>, spec §3.6) to the snippet, its includes and full-source
+        /// code. A compiler that cannot leaves them out; the runner then runs the snippet unguarded.
+        /// </summary>
+        public bool Guards { get; set; }
     }
 
     public sealed class CompileResult

@@ -10,7 +10,7 @@ dotnet pack "$root/dotnet/CodeExec.Roslyn/CodeExec.Roslyn.csproj" -c Release -o 
 version="$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' "$root/dotnet/Directory.Build.props")"
 roslyn="$out/com.IvanMurzak.CodeExec.Roslyn.$version.nupkg"
 listing="$(unzip -l "$roslyn")"
-for f in src/RoslynCSharpCompiler.cs src/SnippetWriter.cs build/com.IvanMurzak.CodeExec.Roslyn.props LICENSE.md; do
+for f in src/RoslynCSharpCompiler.cs src/SnippetWriter.cs src/GuardWriter.cs build/com.IvanMurzak.CodeExec.Roslyn.props LICENSE.md; do
   grep -q " $f\$" <<<"$listing" || { echo "pack check: $f missing from $roslyn" >&2; exit 1; }
 done
 if grep -q " lib/" <<<"$listing"; then echo "pack check: $roslyn must not contain lib/ (source-only)" >&2; exit 1; fi

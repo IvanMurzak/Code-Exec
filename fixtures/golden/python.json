@@ -34,6 +34,8 @@
     {"name": "keyboard-interrupt", "code": "def stop():\n    raise KeyboardInterrupt('stop')\nstop()", "expect": {"success": false, "errorKind": "Runtime", "errorContains": "KeyboardInterrupt: stop"}},
     {"name": "base-exception-subclass", "code": "class Halt(BaseException):\n    pass\nraise Halt('x')", "expect": {"success": false, "errorKind": "Runtime", "errorContains": "Halt: x"}},
     {"name": "generator-exit", "code": "raise GeneratorExit()", "expect": {"success": false, "errorKind": "Runtime", "errorContains": "GeneratorExit"}},
-    {"name": "chained-cause", "code": "try:\n    {}['k']\nexcept KeyError as e:\n    raise ValueError('outer') from e", "expect": {"success": false, "errorKind": "Runtime", "errorContains": "Caused by: KeyError: 'k'"}}
+    {"name": "chained-cause", "code": "try:\n    {}['k']\nexcept KeyError as e:\n    raise ValueError('outer') from e", "expect": {"success": false, "errorKind": "Runtime", "errorContains": "Caused by: KeyError: 'k'"}},
+    {"name": "endless-loop-timeout", "code": "while True:\n    pass", "timeoutMs": 300, "expect": {"success": false, "errorKind": "Timeout", "errorContains": "time budget of 300 ms"}},
+    {"name": "deep-recursion", "code": "def f(n):\n    return f(n + 1)\nf(0)", "expect": {"success": false, "errorKind": "Runtime", "errorContains": "RecursionError"}}
   ]
 }

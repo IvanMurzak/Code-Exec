@@ -9,10 +9,16 @@ import json
 import linecache
 import os
 import sys
+import threading
 import time
 import tokenize
 import traceback
 from contextlib import redirect_stderr, redirect_stdout
+
+try:
+    import ctypes
+except ImportError:  # an embedded interpreter without ctypes: no watchdog, the time budget is not enforced
+    ctypes = None
 
 SNIPPET_FILE = "snippet.py"
 
@@ -25,8 +31,14 @@ _LOG_ENTRY_CHARS = 12  # what one log entry costs on top of its message ("[warni
 _FRAMES_KEPT = 10  # a traceback keeps the first and the last _FRAMES_KEPT of the agent's frames
 _MAX_CAUSES = 5  # chained exceptions (__cause__ / __context__) reported after the error itself
 
-# JSON request field -> run() keyword argument.
+# Time budget (spec section 1, timeoutMs) of a request that sets none, in milliseconds; 0 = no bound.
+TIMEOUT_MS = 120000
+_default_timeout_ms = TIMEOUT_MS
+_REFIRE_SECONDS = 0.1  # a snippet that catches the stop is stopped again this often
+
+# JSON request field -> run() keyword argument (integers).
 _LIMIT_FIELDS = {
+    "timeoutMs": "timeout_ms",
     "maxValueChars": "max_value_chars",
     "maxLogChars": "max_log_chars",
     "maxLogLineChars": "max_log_line_chars",
@@ -42,19 +54,31 @@ def set_value_converter(converter):
     _value_converter = converter
 
 
+def set_default_timeout_ms(timeout_ms):
+    """Host hook: the time budget of a request without ``timeout_ms`` / ``timeoutMs`` (default 120000); 0 = no bound."""
+    global _default_timeout_ms
+    if isinstance(timeout_ms, bool) or not isinstance(timeout_ms, int) or timeout_ms < 0:
+        raise ValueError("timeout_ms must be an integer >= 0 (0 = no bound)")
+    _default_timeout_ms = timeout_ms
+
+
 def run(code, include=(), include_root=None, imports=(), max_value_chars=MAX_VALUE_CHARS, max_log_chars=MAX_LOG_CHARS,
-        max_log_line_chars=MAX_LOG_LINE_CHARS, max_error_chars=MAX_ERROR_CHARS, include_outside_root=False):
+        max_log_line_chars=MAX_LOG_LINE_CHARS, max_error_chars=MAX_ERROR_CHARS, include_outside_root=False, timeout_ms=0):
     """Execute ``code`` and return the contract's response as a dict (never raises for snippet errors).
 
     ``include_outside_root``: the host accepts includes outside ``include_root`` (absolute paths, ``..``).
+    ``timeout_ms``: the snippet's time budget; 0 = the host default (:func:`set_default_timeout_ms`). A snippet still
+    running when it is spent is stopped with a ``Timeout`` error (spec section 4).
     """
     result = _empty()
     limits = (max_value_chars, max_log_chars, max_log_line_chars, max_error_chars)
     if any(isinstance(limit, bool) or not isinstance(limit, int) or limit < 0 for limit in limits):
         return _fail(result, "InvalidRequest", "output limits must be integers >= 0 (0 = no limit)")
+    if isinstance(timeout_ms, bool) or not isinstance(timeout_ms, int) or timeout_ms < 0:
+        return _fail(result, "InvalidRequest", "timeoutMs must be an integer >= 0 (0 = the host's default)")
     logs = _Logs(max_log_chars, max_log_line_chars)
     try:
-        _execute(result, logs, code, include, include_root, imports, include_outside_root)
+        _execute(result, logs, code, include, include_root, imports, include_outside_root, timeout_ms or _default_timeout_ms)
     except BaseException as error:  # the runner itself failed (a snippet wrecked the interpreter state): still answer
         result["success"], result["value"] = False, None
         _fail(result, "Runtime", "%s: %s (while running the snippet)" % (type(error).__name__, _message(error)))
@@ -70,7 +94,7 @@ def run(code, include=(), include_root=None, imports=(), max_value_chars=MAX_VAL
     return result
 
 
-def _execute(result, logs, code, include, include_root, imports, include_outside_root):
+def _execute(result, logs, code, include, include_root, imports, include_outside_root, timeout_ms):
     started = time.perf_counter()
     if not isinstance(code, str) or not code.strip():
         return _fail(result, "InvalidRequest", "code is empty")
@@ -115,6 +139,7 @@ def _execute(result, logs, code, include, include_root, imports, include_outside
     out, err = _LogStream(logs, "info"), _LogStream(logs, "error")
     prefixes = [_prefix(folder) for folder in folders]
     saved = _HostState(code, sources)
+    watchdog = _Watchdog(timeout_ms)
     try:
         sys.path[:0] = folders
         if folders:
@@ -126,24 +151,96 @@ def _execute(result, logs, code, include, include_root, imports, include_outside
         for name in imports:
             scope.setdefault(name.split(".")[0], __import__(name))  # like `import a.b`: binds the top package
         with redirect_stdout(out), redirect_stderr(err):
+            watchdog.start()
             for compiled in file_code:
                 exec(compiled, scope)
             exec(body, scope)
             value = eval(tail, scope) if tail is not None else None
+            watchdog.stop()
         result["value"] = _convert(value)
         result["success"] = True
     except BaseException as error:  # SystemExit, KeyboardInterrupt, ...: a snippet must never take the host down
-        result["errorKind"] = "Runtime"
+        _make_room(saved)
+        watchdog.stop()
+        result["errorKind"] = "Timeout" if isinstance(error, SnippetTimeout) else "Runtime"
         try:
             result["error"] = _format_error(error, root, prefixes, {path for path, _ in files})
         except BaseException:  # the traceback itself cannot be read
             result["error"] = "%s: %s" % (type(error).__name__, _message(error))
     finally:
+        _make_room(saved)
+        watchdog.stop()
         out.flush()
         err.flush()
         saved.restore(prefixes)
     result["executeMs"] = _ms(executing)
     return result
+
+
+def _make_room(saved):
+    """Gives the runner back the host's recursion limit if the snippet lowered it: disarming needs a few frames."""
+    try:
+        sys.setrecursionlimit(max(sys.getrecursionlimit(), saved.recursion_limit))
+    except BaseException:  # a snippet replaced sys.setrecursionlimit: the restore step reports nothing either
+        pass
+
+
+class SnippetTimeout(BaseException):
+    """Raised in the snippet's thread when its time budget is spent. A ``BaseException``: ``except Exception`` in the
+    snippet does not swallow it."""
+
+    budget_ms = 0  # of the run being stopped (one run at a time)
+
+    def __str__(self):
+        return "The snippet ran longer than its time budget of %d ms (timeoutMs) and was stopped." % SnippetTimeout.budget_ms
+
+
+class _Watchdog:
+    """Stops a snippet that outruns its time budget: a timer thread raises :class:`SnippetTimeout` in the snippet's thread
+    (``PyThreadState_SetAsyncExc``), again every ``_REFIRE_SECONDS`` while the snippet catches it. Python delivers it
+    between bytecodes, so pure Python loops stop; a call into C (``time.sleep``, an engine call) finishes first.
+    :meth:`stop` is retried until it went through and clears a stop not yet delivered: none reaches the host."""
+
+    def __init__(self, timeout_ms):
+        self._timeout_ms = timeout_ms
+        self._lock = threading.Lock()
+        self._done = threading.Event()
+        self._thread_id = None
+        self._armed = False
+
+    def start(self):
+        if not self._timeout_ms or ctypes is None:
+            return
+        SnippetTimeout.budget_ms = self._timeout_ms
+        self._thread_id = threading.get_ident()
+        self._armed = True
+        timer = threading.Thread(target=self._watch, name="code_exec watchdog", daemon=True)
+        timer.start()
+
+    def _watch(self):
+        wait = self._timeout_ms / 1000.0
+        while not self._done.wait(wait):
+            with self._lock:
+                if not self._armed:
+                    return
+                _set_async_exc(self._thread_id, SnippetTimeout)
+            wait = _REFIRE_SECONDS
+
+    def stop(self):
+        self._armed = False  # first, before anything that could fail: the timer stops raising
+        while self._thread_id is not None:
+            try:
+                with self._lock:
+                    self._armed = False  # the timer never raises again
+                    self._done.set()
+                _set_async_exc(self._thread_id, None)  # a stop raised but not delivered yet is dropped
+                self._thread_id = None
+            except SnippetTimeout:  # delivered while disarming: disarm again
+                pass
+
+
+def _set_async_exc(thread_id, exception):
+    ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_ulong(thread_id), ctypes.py_object(exception) if exception else None)
 
 
 # JSON request field -> the type it must have when present (spec section 1: a wrong type is InvalidRequest).
