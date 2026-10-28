@@ -433,7 +433,7 @@ class TimeBudgetTests(unittest.TestCase):
         self.assertIn("frame(s) left out", result["error"])
 
 
-CAPPED = sys.version_info < (3, 12)  # Python 3.12+ raise RecursionError before the C stack runs out: no cap there
+CAPPED = runner._CAPPED  # Python 3.12+ raise RecursionError before the C stack runs out: no cap there
 
 
 class RecursionLimitCapTests(unittest.TestCase):

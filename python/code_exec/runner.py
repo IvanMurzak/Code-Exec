@@ -61,6 +61,11 @@ _INT_FIELDS = {
 _value_converter = None
 
 
+def _is_count(value):
+    """An integer >= 0 (not a bool): what every limit and budget setting takes."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
 def set_value_converter(converter):
     """Host hook: ``converter(value) -> value | NotImplemented``. NotImplemented falls back to the default."""
     global _value_converter
@@ -70,7 +75,7 @@ def set_value_converter(converter):
 def set_default_timeout_ms(timeout_ms):
     """Host hook: the time budget of a request without ``timeout_ms`` / ``timeoutMs`` (default 120000); 0 = no bound."""
     global _default_timeout_ms
-    if isinstance(timeout_ms, bool) or not isinstance(timeout_ms, int) or timeout_ms < 0:
+    if not _is_count(timeout_ms):
         raise ValueError("timeout_ms must be an integer >= 0 (0 = no bound)")
     _default_timeout_ms = timeout_ms
 
@@ -79,7 +84,7 @@ def set_max_recursion_limit(limit):
     """Host hook: the highest recursion limit a snippet may set with ``sys.setrecursionlimit`` on Python < 3.12 (default
     3000, a limit the host set itself above it stays allowed); 0 = no cap. Python 3.12+ never cap."""
     global _max_recursion_limit
-    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
+    if not _is_count(limit):
         raise ValueError("limit must be an integer >= 0 (0 = no cap)")
     _max_recursion_limit = limit
 
@@ -94,9 +99,9 @@ def run(code, include=(), include_root=None, imports=(), max_value_chars=MAX_VAL
     """
     result = _empty()
     limits = (max_value_chars, max_log_chars, max_log_line_chars, max_error_chars)
-    if any(isinstance(limit, bool) or not isinstance(limit, int) or limit < 0 for limit in limits):
+    if not all(_is_count(limit) for limit in limits):
         return _fail(result, "InvalidRequest", "output limits must be integers >= 0 (0 = no limit)")
-    if isinstance(timeout_ms, bool) or not isinstance(timeout_ms, int) or timeout_ms < 0:
+    if not _is_count(timeout_ms):
         return _fail(result, "InvalidRequest", "timeoutMs must be an integer >= 0 (0 = the host's default)")
     logs = _Logs(max_log_chars, max_log_line_chars)
     try:
@@ -173,8 +178,7 @@ def _execute(result, logs, code, include, include_root, imports, include_outside
         for name in imports:
             scope.setdefault(name.split(".")[0], __import__(name))  # like `import a.b`: binds the top package
         with redirect_stdout(out), redirect_stderr(err):
-            if _CAPPED and _max_recursion_limit:
-                sys.setrecursionlimit = _RecursionCap(max(_max_recursion_limit, saved.recursion_limit), logs)
+            saved.cap_recursion_limit(logs)
             watchdog.start()
             for compiled in file_code:
                 exec(compiled, scope)
@@ -433,6 +437,11 @@ class _HostState:
         self.saved_lines = {path: linecache.cache.get(path) for path in lines}
         for path, source in lines.items():
             linecache.cache[path] = (len(source), None, source.splitlines(True), path)
+
+    def cap_recursion_limit(self, logs):
+        """Python < 3.12: the snippet's ``sys.setrecursionlimit`` sets at most the host's cap (restored by :meth:`restore`)."""
+        if _CAPPED and _max_recursion_limit:
+            sys.setrecursionlimit = _RecursionCap(max(_max_recursion_limit, self.recursion_limit), logs)
 
     def restore(self, prefixes):
         steps = (

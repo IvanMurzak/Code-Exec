@@ -31,7 +31,7 @@ namespace CodeExecTests
         public static (string ErrorKind, string Error) Execute(string code)
         {
             // The build output, not Assembly.Location: the .NET Framework test host runs a shadow copy without its dependencies.
-            var assembly = Path.Combine(AppContext.BaseDirectory, typeof(ChildProcess).Assembly.GetName().Name + ".dll");
+            var assembly = Fixtures.Path(typeof(ChildProcess).Assembly.GetName().Name + ".dll");
             var start = new ProcessStartInfo
             {
                 RedirectStandardOutput = true,
