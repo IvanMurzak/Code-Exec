@@ -39,8 +39,12 @@ namespace CodeExecTests
         [InlineData("Func<int, Task<int>> g = null;\ng = async n => n == 0 ? 0 : 1 + await g(n - 1);\nawait g(10_000_000)")]
         [InlineData("Func<int, int> f = null;\nf = delegate (int n) { return n == 0 ? 0 : 1 + f(n - 1); };\nf(10_000_000)")]
         [InlineData("class C { public static Func<int, int> F = n => n == 0 ? 0 : 1 + F(n - 1); }\nC.F(10_000_000)")]
-        public void DeepRecursionThroughLambdasIsAnErrorNotACrash(string code)
+        // A lambda whose target is Delegate / object has a natural delegate type (C# 10, Roslyn 4+): still guarded.
+        [InlineData("Delegate d = null;\nd = (int n) => n == 0 ? 0 : 1 + ((Func<int, int>)d)(n - 1);\n((Func<int, int>)d)(10_000_000)", 4)]
+        public void DeepRecursionThroughLambdasIsAnErrorNotACrash(string code, int minRoslyn = 0)
         {
+            if (typeof(Microsoft.CodeAnalysis.CSharp.CSharpCompilation).Assembly.GetName().Version!.Major < minRoslyn)
+                return;
             var (kind, error) = ChildProcess.Execute(code);
             Assert.True(kind == nameof(ErrorKind.Runtime), $"{kind}: {error}");
             Assert.StartsWith("System.InsufficientExecutionStackException: Recursion too deep", error);
@@ -238,6 +242,7 @@ namespace CodeExecTests
         [InlineData("Task.Run(() => Console.WriteLine()).Wait();\n9", "9")]
         [InlineData("Func<int> t = () => throw new InvalidOperationException(\"t\");\ntry { return t(); } catch (InvalidOperationException e) { return e.Message; }", "t")]
         [InlineData("Func<int, int> s = static x => x + 1;\ns(1)", "2")]
+        [InlineData("using TI = System.Threading.Tasks.Task<int>;\nclass C { public async TI F() => await Task.FromResult(1); }\nawait new C().F()", "1")]
         [InlineData("int[] arr = { 1 };\nFunc<int> one = () => arr[0];\n$\"{one()}{((Func<int>)(() => 2))()}\"", "12")]
         public async Task GuardedCodeKeepsItsMeaning(string code, string expected)
         {

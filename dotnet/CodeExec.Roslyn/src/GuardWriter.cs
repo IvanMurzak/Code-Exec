@@ -118,12 +118,27 @@ namespace com.IvanMurzak.CodeExec.Roslyn
             /// <summary>Code with errors never runs: its expression lambdas stay as written, so its diagnostics stay the agent's.</summary>
             public bool HasErrors => _hasErrors ??= Model.GetDiagnostics().Any(d => d.Severity == DiagnosticSeverity.Error);
 
+            /// <summary>
+            /// Converted to a delegate type, or to <c>Delegate</c> / <c>MulticastDelegate</c> / <c>object</c> with a delegate
+            /// natural type (C# 10); never to an expression tree (<c>Expression&lt;T&gt;</c>, <c>LambdaExpression</c>, ...).
+            /// </summary>
             public bool IsDelegate(AnonymousFunctionExpressionSyntax function)
             {
                 if (!_delegates.TryGetValue(function, out var isDelegate))
-                    _delegates[function] = isDelegate = Model.GetTypeInfo(function).ConvertedType?.TypeKind == TypeKind.Delegate;
+                {
+                    var info = Model.GetTypeInfo(function);
+                    var target = info.ConvertedType;
+                    isDelegate = target?.TypeKind == TypeKind.Delegate
+                        || (target != null && info.Type?.TypeKind == TypeKind.Delegate && (target.SpecialType == SpecialType.System_Delegate
+                            || target.SpecialType == SpecialType.System_MulticastDelegate || target.SpecialType == SpecialType.System_Object));
+                    _delegates[function] = isDelegate;
+                }
                 return isDelegate;
             }
+
+            /// <summary>Whether an async member's return type is a generic task type, or null when it does not bind.</summary>
+            public bool? IsGenericTask(TypeSyntax type) =>
+                Model.GetTypeInfo(type).Type is INamedTypeSymbol named && named.TypeKind != TypeKind.Error ? named.Arity > 0 : (bool?)null;
         }
 
         static void Collect(SyntaxNode node, List<Edit> edits, Semantics? semantics)
@@ -159,10 +174,10 @@ namespace com.IvanMurzak.CodeExec.Roslyn
                     }
                     break;
                 case MethodDeclarationSyntax method:
-                    Function(method.Body, method.ExpressionBody, method.SemicolonToken, ReturnsValue(method.ReturnType, method.Modifiers), edits);
+                    Function(method.Body, method.ExpressionBody, method.SemicolonToken, method.ExpressionBody != null && ReturnsValue(method.ReturnType, method.Modifiers, semantics), edits);
                     break;
                 case LocalFunctionStatementSyntax function:
-                    Function(function.Body, function.ExpressionBody, function.SemicolonToken, ReturnsValue(function.ReturnType, function.Modifiers), edits);
+                    Function(function.Body, function.ExpressionBody, function.SemicolonToken, function.ExpressionBody != null && ReturnsValue(function.ReturnType, function.Modifiers, semantics), edits);
                     break;
                 case OperatorDeclarationSyntax _:
                 case ConversionOperatorDeclarationSyntax _:
@@ -292,8 +307,8 @@ namespace com.IvanMurzak.CodeExec.Roslyn
             }
             if (!(semantics.Model.GetSymbolInfo(lambda).Symbol is IMethodSymbol method) || method.ReturnType.TypeKind == TypeKind.Error)
                 return;
-            // Every async lambda without a value returns a non-generic task type.
-            var value = !method.ReturnsVoid && !(method.IsAsync && method.ReturnType is INamedTypeSymbol { IsGenericType: false });
+            // Every async lambda without a value returns a non-generic task type (Arity: a nested type of a generic one is not).
+            var value = !method.ReturnsVoid && !(method.IsAsync && method.ReturnType is INamedTypeSymbol { Arity: 0 });
             ToBlock(body, body.SpanStart, 0, body.Span.End, "{ ", "; }", value, edits);
         }
 
@@ -320,13 +335,16 @@ namespace com.IvanMurzak.CodeExec.Roslyn
         /// <summary>
         /// Whether <c>=> expr</c> of this signature is a value: not <c>void</c>; for <c>async</c>, only a generic task type
         /// (<c>Task&lt;T&gt;</c>, <c>UniTask&lt;T&gt;</c>): every async method without a value returns a non-generic one.
+        /// The semantic model decides when there is one (an alias of <c>Task&lt;int&gt;</c>), else the syntax.
         /// </summary>
-        static bool ReturnsValue(TypeSyntax type, SyntaxTokenList modifiers)
+        static bool ReturnsValue(TypeSyntax type, SyntaxTokenList modifiers, Semantics? semantics)
         {
             if (type is PredefinedTypeSyntax predefined && predefined.Keyword.IsKind(SyntaxKind.VoidKeyword))
                 return false;
             if (!modifiers.Any(SyntaxKind.AsyncKeyword))
                 return true;
+            if (semantics?.IsGenericTask(type) is bool generic)
+                return generic;
             var name = type is QualifiedNameSyntax qualified ? qualified.Right : type is AliasQualifiedNameSyntax alias ? alias.Name : type;
             return name is GenericNameSyntax;
         }

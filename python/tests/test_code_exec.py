@@ -498,6 +498,24 @@ class RecursionLimitCapTests(unittest.TestCase):
                 code_exec.set_max_recursion_limit(bad)
 
     @unittest.skipUnless(CAPPED, "the cap applies to Python < 3.12 only")
+    def test_index_objects_are_capped_and_a_kept_reference_caps_nothing_afterwards(self):
+        before, getter = sys.getrecursionlimit(), sys.getrecursionlimit
+        code = ("import sys\nclass Big:\n    def __index__(self):\n        return 50000\nsys.setrecursionlimit(Big())\n"
+                "kept = sys.setrecursionlimit\nsys.getrecursionlimit = lambda: 1\nsys.recursion_cap = kept\n"
+                "sys.getrecursionlimit()")
+        try:
+            result = code_exec.run(code)
+            self.assertEqual("1", result["value"])
+            self.assertIn("sys.setrecursionlimit(50000) was capped at 3000", self.warnings(result)[0])
+            self.assertIs(getter, sys.getrecursionlimit)
+            self.assertEqual(before, sys.getrecursionlimit())
+            sys.recursion_cap(before + 5000)  # the snippet's reference, called by the host after the run
+            self.assertEqual(before + 5000, sys.getrecursionlimit())
+        finally:
+            sys.setrecursionlimit(before)
+            vars(sys).pop("recursion_cap", None)
+
+    @unittest.skipUnless(CAPPED, "the cap applies to Python < 3.12 only")
     def test_a_host_limit_above_the_cap_stays_available(self):
         before = sys.getrecursionlimit()
         sys.setrecursionlimit(5000)

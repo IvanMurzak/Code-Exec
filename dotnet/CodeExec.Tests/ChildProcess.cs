@@ -48,15 +48,16 @@ namespace CodeExecTests
 #endif
             using var process = Process.Start(start)!;
             var stderr = process.StandardError.ReadToEndAsync();
-            var stdout = process.StandardOutput.ReadToEnd();
+            var output = process.StandardOutput.ReadToEndAsync();
             if (!process.WaitForExit(120_000))
             {
                 process.Kill();
                 throw new TimeoutException("the child process did not end within 120 s");
             }
-            if (process.ExitCode != 0)
-                throw new InvalidOperationException($"the child process ended with exit code {process.ExitCode}: {stdout} {stderr.Result}");
+            var stdout = output.Result;
             var split = stdout.IndexOf('\n');
+            if (process.ExitCode != 0 || split < 0)
+                throw new InvalidOperationException($"the child process ended with exit code {process.ExitCode}: {stdout} {stderr.Result}");
             return (stdout.Substring(0, split), stdout.Substring(split + 1));
         }
     }

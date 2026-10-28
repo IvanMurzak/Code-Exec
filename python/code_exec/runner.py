@@ -7,6 +7,7 @@ import collections
 import io
 import json
 import linecache
+import operator
 import os
 import sys
 import threading
@@ -222,15 +223,17 @@ class _RecursionCap:
 
     def __init__(self, cap, logs):
         self._cap, self._logs, self._warned = cap, logs, False
+        self.active = True  # a reference the snippet kept (`from sys import setrecursionlimit`) caps nothing after the run
 
     def __call__(self, limit):
-        if isinstance(limit, int) and limit > self._cap:
+        limit = operator.index(limit)  # what Python's own accepts (numpy integers too); anything else is its TypeError
+        if self.active and limit > self._cap:
             if not self._warned:
                 self._warned = True
                 self._logs.add("warning", "sys.setrecursionlimit(%d) was capped at %d: on Python 3.11 and older a higher "
                                           "limit can overflow the C stack and end the host" % (limit, self._cap))
             limit = self._cap
-        _SET_RECURSION_LIMIT(limit)  # bad values raise as Python's own do
+        _SET_RECURSION_LIMIT(limit)  # a limit too low raises as Python's own does
 
 
 class SnippetTimeout(BaseException):
@@ -429,7 +432,8 @@ class _HostState:
         self.bytecode = sys.dont_write_bytecode
         self.cwd = os.getcwd()
         self.recursion_limit = sys.getrecursionlimit()
-        self.set_recursion_limit = sys.setrecursionlimit
+        self.set_recursion_limit, self.get_recursion_limit = sys.setrecursionlimit, sys.getrecursionlimit
+        self.cap = None
         self.modules = set(sys.modules)
         # The agent's own sources, so tracebacks show their lines (and never a same-named file elsewhere on sys.path).
         lines = dict(sources)
@@ -441,12 +445,12 @@ class _HostState:
     def cap_recursion_limit(self, logs):
         """Python < 3.12: the snippet's ``sys.setrecursionlimit`` sets at most the host's cap (restored by :meth:`restore`)."""
         if _CAPPED and _max_recursion_limit:
-            sys.setrecursionlimit = _RecursionCap(max(_max_recursion_limit, self.recursion_limit), logs)
+            self.cap = sys.setrecursionlimit = _RecursionCap(max(_max_recursion_limit, self.recursion_limit), logs)
 
     def restore(self, prefixes):
         steps = (
             lambda: _SET_RECURSION_LIMIT(self.recursion_limit),  # first: the other steps need the stack
-            lambda: sys.__setattr__("setrecursionlimit", self.set_recursion_limit),
+            self._restore_recursion_functions,
             self._restore_path,
             lambda: sys.__setattr__("dont_write_bytecode", self.bytecode),
             lambda: os.chdir(self.cwd),
@@ -458,6 +462,11 @@ class _HostState:
                 step()
             except BaseException:  # nothing left to restore it from (the folder is gone, ...): keep restoring the rest
                 pass
+
+    def _restore_recursion_functions(self):
+        if self.cap is not None:
+            self.cap.active = False
+        sys.setrecursionlimit, sys.getrecursionlimit = self.set_recursion_limit, self.get_recursion_limit
 
     def _restore_path(self):
         if isinstance(getattr(sys, "path", None), list):

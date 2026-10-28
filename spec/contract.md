@@ -133,8 +133,9 @@ the host turns them off (`CodeRunnerOptions.ExecutionGuards`):
   allowance or close to the limit the run stops with a `Runtime` error
   `System.InsufficientExecutionStackException: Recursion too deep: ...`, before a stack overflow could end the host.
   An expression-bodied lambda gets the check when it is a delegate (`Func<int, int> f = n => ... f(n - 1)`); not when it
-  is an expression tree, sits inside one (or inside a query expression), or has a compile error. Not guarded either:
-  members the compiler generates (a record's `ToString`). Recursion that runs only through those is not caught.
+  is an expression tree, sits inside one, inside a query expression or inside an interpolation hole, or when its file has
+  a compile error. Not guarded either: members the compiler generates (a record's `ToString`). Recursion that runs only
+  through those is not caught.
 - **Time.** Every loop iteration (`while`, `do`, `for`, `foreach`) and every `goto` counts down and, every few
   iterations, reads the clock (every iteration while iterations are slow); so do the calls above. Once `timeoutMs` is
   spent, the run stops with `Timeout`: `System.TimeoutException: The snippet ran longer than its time budget of N ms
@@ -176,12 +177,15 @@ the host turns them off (`CodeRunnerOptions.ExecutionGuards`):
   Threads the snippet started are not stopped.
 - **Recursion** ends with Python's own `RecursionError` (`Runtime`) at the interpreter's recursion limit. Python 3.11 and
   older do not check the C stack: past a few thousand, a raised limit lets C-level recursion (`repr` / `json.dumps` of a
-  deeply nested list) overflow it, which ends the host. So on Python < 3.12 a snippet's `sys.setrecursionlimit(n)` sets
-  at most the host's cap (default `3000`, `code_exec.set_max_recursion_limit(n)`, `0` = no cap; a limit the host set
-  itself above the cap stays allowed). A capped call adds one `warning` log entry per run: `sys.setrecursionlimit(N) was
-  capped at C: on Python 3.11 and older a higher limit can overflow the C stack and end the host`. The cap guards
-  against accidents, not against a snippet that sets out to get around it. 3.12+ raise `RecursionError` and are not
-  capped. The recursion limit and `sys.setrecursionlimit` are restored after the run.
+  deeply nested list) overflow it, which ends the host. So on Python < 3.12 a snippet's (and its includes')
+  `sys.setrecursionlimit(n)` sets at most the host's cap (default `3000`, `code_exec.set_max_recursion_limit(n)`, `0` = no
+  cap; a limit the host set itself above the cap stays allowed). A capped call adds one `warning` log entry per run:
+  `sys.setrecursionlimit(N) was capped at C: on Python 3.11 and older a higher limit can overflow the C stack and end the
+  host`. The default suits hosts with an 8–12 MB stack (Unreal's game thread, Linux main threads); a host with a smaller
+  one (Windows `python.exe`: 2 MB) should lower it. The cap guards against accidents, not against a snippet that sets out
+  to get around it; modules the host lists in `imports` are not capped. Python 3.12+ check the C stack themselves
+  (`RecursionError` for most C-level recursion) and are not capped. The recursion limit, `sys.setrecursionlimit` and
+  `sys.getrecursionlimit` are restored after the run.
 - `value` conversion: `None` → null; `str`, `int`, `float`, `bool` → their `str()`; `dict` / `list` / `tuple` →
   JSON when serializable; anything else → `str()` (hosts may plug a converter, e.g. Unreal objects → path).
 
