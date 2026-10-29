@@ -1,0 +1,37 @@
+dotnet/CodeExec.Roslyn/src/SnippetWriter.cs
+  s_7bc72ecaebd05d::t_e393593946bfe4 84-86
+  s_7bc72ecaebd05d::t_d13cc73347a516 42-45,50,230-234,238,254,265-275
+dotnet/CodeExec.Tests/RunnerTests.cs
+  s_7bc72ecaebd05d::t_464efba201f179 320-330
+python/tests/test_code_exec.py
+  s_7bc72ecaebd05d::t_51cdc75304d386 496,500-524
+  s_7bc72ecaebd05d::t_7ed0c927852156 525
+dotnet/CodeExec.Roslyn/src/GuardWriter.cs
+  s_7bc72ecaebd05d::t_35f68be8d625ac 238-241,245,252,257,260,265-266,271-273,275,277,280,282,286-287,291-292,296,300
+dotnet/CodeExec.Tests/GuardTests.cs
+  s_7bc72ecaebd05d::t_cac12acf7a6b6d 236-237,253-254,259-268,295-299
+dotnet/CodeExec/CodeRunner.cs
+  s_7bc72ecaebd05d::t_9d185a761dbfeb 779-782,785-787
+dotnet/CodeExec/ExecutionGuard.cs
+  s_7bc72ecaebd05d::t_2eaca102366339 59-61,73-77,86-89,91,94,117-118,120,132-133,136-137,145,149,152,154,159-165,167-171,173-180,183,186-215,218,220,223,226,229-236,238,241
+python/code_exec/runner.py
+  s_7bc72ecaebd05d::t_59d0750e9e3ec1 205,229,294,332-360,364-367,371-373,376,379-389,397-406,410-414,417-419,421-444,447,449-451,453-454,456-457,460-464,466,469-475
+spec/contract.md
+  s_7bc72ecaebd05d::t_610005719acf20 158-159,162-175,208-217
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "4f833a05e00fb528362e047c2f5b9f4b78f2c6fc",
+  "prompts": {},
+  "sessions": {
+    "s_7bc72ecaebd05d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "40274cb2-edf8-49ba-9a73-33b83cb5be53",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Ivan Murzak <Ivan.D.Murzak@gmail.com>"
+    }
+  }
+}
