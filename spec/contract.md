@@ -172,7 +172,9 @@ the host turns them off (`CodeRunnerOptions.ExecutionGuards`):
   stored first and started later through another API; and work that a callback left behind starts after the run (it
   is the callback's own). Caveat: a timer or other callback created inside asynchronous task work inherits the run
   through its execution context; its code is stopped like the task's, and an exception unhandled in a timer callback
-  ends the process.
+  ends the process. Cost: a few hundred ns per start; once a run that started work has ended, every clock check also
+  looks whose work it runs while work of a run still executes (on a reused Mono assembly, for good once a run used
+  asynchronous task work): about 4 ns per call of a call-heavy loop then.
 - **After the run.** A run that finished lifts the time budget: callbacks it left behind (events, stored delegates)
   keep only the stack check. A timed-out run keeps its stop, so what still runs of it (an asynchronous continuation,
   a thread it started) stops at its next check; on a host that cannot unload (Mono), its assembly is not reused.

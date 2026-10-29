@@ -80,7 +80,7 @@ namespace com.IvanMurzak.CodeExec
 internal static class __CodeExecGuard
 {
     public static int Calls, Jumps;
-    static int _start, _last, _interval, _budget, _stopped, _maxStack, _baseThread, _orphans, _asyncWork, _live;
+    static int _start, _last, _interval, _budget, _stopped, _maxStack, _baseThread, _orphans, _asyncOrphans, _asyncWork, _live;
     static long _base;
     static Run _current;
     // The run of the work running: synchronous work on this thread, and asynchronous task work (it flows into the work's
@@ -91,7 +91,7 @@ internal static class __CodeExecGuard
     /// <summary>One run: whether it has ended, whether it started work, and how much of that work has not finished.</summary>
     public sealed class Run
     {
-        public int Ended, Spawned, Pending;
+        public int Ended, Spawned, Pending, Async;
     }
 
     public static unsafe void Arm(int budgetMs, int maxStackBytes)
@@ -117,6 +117,8 @@ internal static class __CodeExecGuard
         global::System.Threading.Interlocked.Exchange(ref ended.Ended, 1); // a full fence: Spawn sees it, or End sees Spawned
         if (global::System.Threading.Volatile.Read(ref ended.Spawned) != 0)
             _orphans = 1;
+        if (global::System.Threading.Volatile.Read(ref ended.Async) != 0)
+            _asyncOrphans = 1; // what its async work started unwrapped carries the run on after that work: always look
         return global::System.Threading.Volatile.Read(ref ended.Pending);
     }
 
@@ -127,7 +129,7 @@ internal static class __CodeExecGuard
         return true;
     }
 
-    public static bool Running() => _stopped == 0 && (_orphans == 0 || _live == 0 || !Orphaned());
+    public static bool Running() => _stopped == 0 && (_orphans == 0 || (_live == 0 && _asyncOrphans == 0) || !Orphaned());
 
     // The AsyncLocal is slow to read: only once asynchronous task work has ever run.
     static Run Current() => _thread ?? (_asyncWork != 0 ? _async.Value : null);
@@ -199,6 +201,9 @@ internal static class __CodeExecGuard
             return value;
         }
         _asyncWork = 1;
+        global::System.Threading.Interlocked.Exchange(ref run.Async, 1);
+        if (global::System.Threading.Volatile.Read(ref run.Ended) != 0)
+            _asyncOrphans = 1;
         Started();
         var thread = _thread;
         var flowing = _async.Value;
@@ -287,7 +292,7 @@ internal static class __CodeExecGuard
     {
         if (_stopped == 0)
         {
-            if (_orphans != 0 && _live != 0 && Orphaned())
+            if (_orphans != 0 && (_live != 0 || _asyncOrphans != 0) && Orphaned())
                 throw new global::System.TimeoutException(""The snippet's run has ended, so this thread or task it started was stopped: work a snippet starts must finish (join or await it) before the snippet returns."");
             if (_budget <= 0 || unchecked(global::System.Environment.TickCount - _start) < _budget)
                 return;

@@ -235,6 +235,8 @@ namespace CodeExecTests
         [InlineData("var t = new Task(() => { while (true) { } });\nt.Start();\nreturn (Func<bool>)(() => ((IAsyncResult)t).AsyncWaitHandle.WaitOne(10_000));")]
         // Asynchronous task work belongs to the run until its task ends, also when its first await returned before the run ended.
         [InlineData("var t = Task.Run(async () => { await Task.Delay(200); while (true) { } });\nSystem.Threading.Thread.Sleep(50);\nreturn (Func<bool>)(() => ((IAsyncResult)t).AsyncWaitHandle.WaitOne(10_000));")]
+        // Code that asynchronous task work starts without a wrapper (a fire-and-forget async method) carries the run on.
+        [InlineData("class K { public static System.Threading.ManualResetEvent Done = new System.Threading.ManualResetEvent(false); public static async Task Spin() { try { await Task.Delay(300); while (true) { } } finally { Done.Set(); } } }\nTask.Run(async () => { _ = K.Spin(); await Task.Yield(); }).Wait();\nreturn (Func<bool>)(() => K.Done.WaitOne(10_000));")]
         // Started by work the run started: it belongs to the same run.
         [InlineData("var inner = new TaskCompletionSource<Task>();\nTask.Run(() => inner.SetResult(Task.Run(() => { while (true) { } })));\nvar t = inner.Task.Result;\nreturn (Func<bool>)(() => ((IAsyncResult)t).AsyncWaitHandle.WaitOne(10_000));")]
         // Caught: the stop passes the agent's catch-all.
