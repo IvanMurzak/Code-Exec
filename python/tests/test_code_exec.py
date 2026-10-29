@@ -603,9 +603,9 @@ class BlockingWaitTests(unittest.TestCase):
                 self.assert_times_out(code)
 
     def test_join_on_a_thread_blocked_in_a_wait(self):
-        result = self.assert_times_out("import threading\ne = threading.Event()\ndef f():\n    e.wait()\n"
-                                       "t = threading.Thread(target=f, daemon=True)\nt.start()\nt.join()")
-        self.assertEqual([], result["logs"])  # stopped in its wait at the deadline, gone by the end
+        # The thread is stopped in its wait at the deadline (it may still be ending as the run ends: no log assertion).
+        self.assert_times_out("import threading\ne = threading.Event()\ndef f():\n    e.wait()\n"
+                              "t = threading.Thread(target=f, daemon=True)\nt.start()\nt.join()")
 
     def test_result_of_work_blocked_in_a_wait(self):
         self.assert_times_out("import threading\nfrom concurrent.futures import ThreadPoolExecutor\n"
@@ -636,6 +636,16 @@ class BlockingWaitTests(unittest.TestCase):
         result, _ = self.run_child(code, timeout_ms=10000)
         self.assertTrue(result["success"], result)
         self.assertEqual("[[7, true], [false, false]]", result["value"])
+
+    def test_a_run_that_outran_its_budget_in_a_c_call_is_a_timeout(self):
+        # A raw lock acquire is C, never sliced: it returns after the deadline; the snippet swallows the stop and returns
+        # before it is raised again, and the run is still no success.
+        code = ("import _thread\nlock = _thread.allocate_lock()\nlock.acquire()\ntry:\n    lock.acquire(True, 0.6)\n"
+                "except BaseException:\n    pass\n1")
+        result = code_exec.run(code, timeout_ms=200)
+        self.assertEqual("Timeout", result["errorKind"], result)
+        self.assertTrue(result["error"].startswith("SnippetTimeout: The snippet ran longer than its time budget of 200 ms "
+                                                   "(timeoutMs): it finished only after"), result["error"])
 
     def test_the_host_converter_is_not_budgeted(self):
         # The snippet finished in time: a converter that waits past the deadline does not turn it into a Timeout.

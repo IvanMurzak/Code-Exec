@@ -320,6 +320,9 @@ namespace CodeExecTests
         [InlineData("var o = new object();\nlock (o) System.Threading.Monitor.Wait(o);")]
         [InlineData("System.Threading.Thread.Sleep(60_000);")]
         [InlineData("System.Threading.Thread.Sleep(System.Threading.Timeout.Infinite);")]
+        [InlineData("System.Threading.Thread.Sleep(60000);\n1")]
+        [InlineData("System.Threading.Thread.Sleep(2000);\n1")]
+        [InlineData("Task.Delay(60_000).Wait();\n1")]
         [InlineData("new System.Threading.ManualResetEvent(false).WaitOne();")]
         [InlineData("System.Threading.WaitHandle.WaitAny(new System.Threading.WaitHandle[] { new System.Threading.ManualResetEvent(false) });")]
         [InlineData("new TaskCompletionSource<int>().Task.Wait(60_000);")]
@@ -336,6 +339,7 @@ namespace CodeExecTests
             var run = ChildProcess.Run(code, timeoutMs: 1000, lingerMs: 300);
             Assert.True(run.ErrorKind == nameof(ErrorKind.Timeout), run.ErrorKind + ": " + run.Error);
             Assert.StartsWith("System.TimeoutException: The snippet ran longer than its time budget of 1000 ms (timeoutMs)", run.Error);
+            Assert.DoesNotContain("finished only after", run.Error); // stopped in the wait, not reported after it returned
             Assert.True(run.ExecuteMs < 2500, $"stopped after {run.ExecuteMs} ms");
             Assert.Equal("3", run.After);
         }
@@ -383,6 +387,15 @@ namespace CodeExecTests
             var result = Fixtures.Runner(configure: o => o.DefaultTimeoutMs = 0).Execute(new ExecuteRequest { Code = code });
             Assert.True(result.Success, result.Error);
             Assert.Equal("1", result.Value);
+        }
+
+        // A wait the guards cannot slice (here a named argument) that returns past the budget: the run is no success.
+        [Fact]
+        public void ARunThatOutranItsBudgetInAnUnslicedCallIsATimeout()
+        {
+            var result = Fixtures.Runner().Execute(new ExecuteRequest { Code = "System.Threading.Thread.Sleep(millisecondsTimeout: 600);\n1", TimeoutMs = 200 });
+            Assert.Equal(ErrorKind.Timeout, result.ErrorKind);
+            Assert.StartsWith("System.TimeoutException: The snippet ran longer than its time budget of 200 ms (timeoutMs): it finished only after", result.Error);
         }
 
         [Fact]

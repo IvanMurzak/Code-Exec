@@ -165,7 +165,10 @@ the host turns them off (`CodeRunnerOptions.ExecutionGuards`):
   property pattern path (`x is { Task.Result: 1 }`), through `base.`, a method group or a delegate; .NET 9+
   `Task.WaitAll` given a span; `lock` / `Monitor.Enter` and other waits (`BlockingCollection.Take`, `Barrier`,
   `SpinWait`, `Process.WaitForExit`, I/O); and every wait inside host, engine or framework code the snippet calls (an
-  engine call that never returns). A native thread cannot be stopped at all.
+  engine call that never returns). A native thread cannot be stopped at all. A synchronous run that returns only after
+  its budget (blocked in such a call) is no success either: `Timeout`, `System.TimeoutException: The snippet ran longer
+  than its time budget of N ms (timeoutMs): it finished only after M ms, blocked in a call the guards cannot interrupt
+  (a lock, a host or engine call).`, and its value is dropped.
 - **Once stopped**, every further check throws again, and the agent's `catch` clauses that could catch the stop (no
   type, `Exception`, `SystemException` or the stop's own type) get a filter that lets it pass, so it reaches the runtime;
   `finally` blocks still run. That filter makes a few invalid programs compile (a later `catch` that an earlier
@@ -237,7 +240,8 @@ the host turns them off (`CodeRunnerOptions.ExecutionGuards`):
   host that replaced one meanwhile keeps the stand-in in its chain, which then waits as Python does outside runs). Not
   covered (stopped only when the call returns): `Lock.acquire` / `RLock.acquire` (C), `queue.SimpleQueue.get`,
   `select` / sockets / `subprocess` waits, `asyncio`'s event loop waiting for I/O, waits inside C extensions or the
-  engine, and `from time import sleep` bound before the run.
+  engine, and `from time import sleep` bound before the run. A run whose deadline passed while it still ran (blocked
+  in such a call) is a `Timeout` even when it then returns without the stop reaching it.
 - **Threads.** Threads the snippet starts (`threading.Thread.start`, `threading.Timer` included, called from the
   snippet's thread or from one of those threads while it runs) may not outlive it. When it ends (finished or timed
   out), a `threading.Timer` that has not fired is cancelled, and every other such thread still alive gets

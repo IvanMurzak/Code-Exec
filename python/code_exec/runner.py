@@ -213,6 +213,10 @@ def _execute(result, logs, code, include, include_root, imports, include_outside
             value = eval(tail, scope) if tail is not None else None
             _make_room(saved)
             watchdog.stop()
+            if watchdog.fired:  # it outran its budget in a call nothing could interrupt (a C call, a lock): no success
+                raise threads.stop_type(
+                    "The snippet ran longer than its time budget of %d ms (timeoutMs): it finished only after %d ms, blocked "
+                    "in a call that cannot be interrupted (a C call, a lock, an engine call)." % (timeout_ms, _ms(executing)))
             threads.disarm()
         result["value"] = _convert(value)
         result["success"] = True
@@ -274,6 +278,8 @@ class SnippetTimeout(BaseException):
     budget_ms = 0
 
     def __str__(self):
+        if self.args:
+            return str(self.args[0])
         return "The snippet ran longer than its time budget of %d ms (timeoutMs) and was stopped." % type(self).budget_ms
 
 
@@ -323,6 +329,11 @@ class _Watchdog:
                     deadline = now + _REFIRE_SECONDS
         finally:
             self._exited = True
+
+    @property
+    def fired(self):
+        """Whether the deadline passed while the snippet still ran."""
+        return self._fired
 
     def stop(self):
         while self._thread_id is not None:
