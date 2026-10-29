@@ -258,7 +258,7 @@ namespace com.IvanMurzak.CodeExec.Roslyn
             Add("System.Threading.Tasks.Task", "Wait", "TaskWait", none, new[] { Ms }, new[] { Span }, new[] { Token }, new[] { Ms, Token });
             Add("System.Threading.Tasks.Task", "WaitAll", "TaskWaitAll", new[] { TaskArray }, new[] { TaskArray, Ms }, new[] { TaskArray, Span },
                 new[] { TaskArray, Token }, new[] { TaskArray, Ms, Token },
-                new[] { "System.Collections.Generic.IEnumerable<System.Threading.Tasks.Task>" });
+                new[] { "System.Collections.Generic.IEnumerable<System.Threading.Tasks.Task>", Token }); // .NET 9+, the token optional
             targets[WaitAllSpan] = "TaskWaitAll";
             Add("System.Threading.Tasks.Task", "WaitAny", "TaskWaitAny", new[] { TaskArray }, new[] { TaskArray, Ms }, new[] { TaskArray, Span },
                 new[] { TaskArray, Token }, new[] { TaskArray, Ms, Token });
@@ -288,12 +288,16 @@ namespace com.IvanMurzak.CodeExec.Roslyn
                 return;
             if (method.Name == "GetResult")
             {
-                // x.GetAwaiter().GetResult() of a Task / Task<T>.
+                // x.GetAwaiter().GetResult() and x.ConfigureAwait(b).GetAwaiter().GetResult() of a Task / Task<T>.
                 if (call.Expression is MemberAccessExpressionSyntax outer && outer.Expression is InvocationExpressionSyntax awaiter
                     && awaiter.ArgumentList.Arguments.Count == 0 && awaiter.Expression is MemberAccessExpressionSyntax getAwaiter
-                    && getAwaiter.Name.Identifier.ValueText == "GetAwaiter" && !(getAwaiter.Expression is BaseExpressionSyntax)
-                    && semantics.Model.GetSymbolInfo(awaiter).Symbol is IMethodSymbol get && !get.IsStatic && IsTask(get.ContainingType))
-                    Ready(getAwaiter.Expression, edits);
+                    && getAwaiter.Name.Identifier.ValueText == "GetAwaiter" && !(getAwaiter.Expression is BaseExpressionSyntax))
+                {
+                    var awaited = getAwaiter.Expression;
+                    var task = TaskCalled(awaited, "ConfigureAwait", semantics) ?? (IsTask(semantics.Model.GetTypeInfo(awaited).Type) ? awaited : null);
+                    if (task != null)
+                        Ready(task, edits);
+                }
                 return;
             }
             var signature = Signature(method);
@@ -309,7 +313,7 @@ namespace com.IvanMurzak.CodeExec.Roslyn
                 edits.Add(new Edit(call.Expression.SpanStart, target, call.Expression.SpanStart, edits.Count, remove: call.Expression.Span.Length));
                 return;
             }
-            if (!(call.Expression is MemberAccessExpressionSyntax access) || access.Expression is BaseExpressionSyntax)
+            if (!(call.Expression is MemberAccessExpressionSyntax access) || access.Expression is BaseExpressionSyntax || InConditionalAccess(access.Expression))
                 return;
             // `x.Wait(args)` → `Guard.TaskWait(x, args)`: `.Wait(` gives way to `, ` (to nothing without arguments).
             var receiver = access.Expression;
@@ -324,15 +328,52 @@ namespace com.IvanMurzak.CodeExec.Roslyn
             if (semantics.HasErrors || access.Expression is BaseExpressionSyntax
                 || !(semantics.Model.GetSymbolInfo(access).Symbol is IPropertySymbol property) || property.IsStatic
                 || property.ContainingType.OriginalDefinition.ToDisplayString() != "System.Threading.Tasks.Task<TResult>"
-                || access.Ancestors().Any(a => a is InvocationExpressionSyntax nameOf && nameOf.Expression is IdentifierNameSyntax name
-                    && name.Identifier.ValueText == "nameof")
+                || access.Ancestors().Any(a => a is SubpatternSyntax // `x is { Task.Result: 3 }` (C# 10): a property path
+                    || (a is InvocationExpressionSyntax nameOf && nameOf.Expression is IdentifierNameSyntax name && name.Identifier.ValueText == "nameof"))
                 || InExpressionTree(access, semantics))
                 return;
             Ready(access.Expression, edits);
         }
 
+        /// <summary>The task <c>x</c> of <paramref name="call"/> when it is <c>x.Name(...)</c> on a Task / Task&lt;T&gt;, else null.</summary>
+        static ExpressionSyntax? TaskCalled(ExpressionSyntax call, string name, Semantics semantics) =>
+            call is InvocationExpressionSyntax invocation && invocation.Expression is MemberAccessExpressionSyntax member
+            && member.Name.Identifier.ValueText == name && !(member.Expression is BaseExpressionSyntax)
+            && semantics.Model.GetSymbolInfo(invocation).Symbol is IMethodSymbol method && !method.IsStatic && IsTask(method.ContainingType)
+                ? member.Expression : null;
+
+        /// <summary>
+        /// Whether the expression starts inside a conditional access (<c>a?.Task.Result</c>, <c>a?[0].Wait()</c>): no code
+        /// can be put in front of it there.
+        /// </summary>
+        static bool InConditionalAccess(ExpressionSyntax expression)
+        {
+            while (true)
+            {
+                switch (expression)
+                {
+                    case MemberAccessExpressionSyntax member:
+                        expression = member.Expression;
+                        break;
+                    case InvocationExpressionSyntax invocation:
+                        expression = invocation.Expression;
+                        break;
+                    case ElementAccessExpressionSyntax element:
+                        expression = element.Expression;
+                        break;
+                    case PostfixUnaryExpressionSyntax postfix: // `a?.b!.Result`
+                        expression = postfix.Operand;
+                        break;
+                    default:
+                        return expression is MemberBindingExpressionSyntax || expression is ElementBindingExpressionSyntax;
+                }
+            }
+        }
+
         static void Ready(ExpressionSyntax task, List<Edit> edits)
         {
+            if (InConditionalAccess(task))
+                return;
             edits.Add(new Edit(task.SpanStart, ExecutionGuard.QualifiedName + ".Ready(", task.SpanStart, edits.Count));
             edits.Add(new Edit(task.Span.End, ")", task.Span.End, edits.Count, closer: true));
         }

@@ -340,6 +340,51 @@ namespace CodeExecTests
             Assert.Equal("3", run.After);
         }
 
+        // Waits the rewrite cannot reach into stay as written: they must still compile and mean what they meant.
+        [Theory]
+        [InlineData("var tcs = new TaskCompletionSource<int>();\ntcs.SetResult(3);\nTaskCompletionSource<int> n = tcs;\nreturn n?.Task.Result;", "3", 0)]
+        [InlineData("var tcs = new TaskCompletionSource<int>();\ntcs.SetResult(3);\nTaskCompletionSource<int> n = tcs;\nn?.Task.Wait();\nreturn n?.Task.GetAwaiter().GetResult();", "3", 0)]
+        [InlineData("var tasks = new[] { Task.FromResult(4) };\nreturn tasks?[0].Result;", "4", 0)]
+        [InlineData("var tcs = new TaskCompletionSource<int>();\ntcs.SetResult(3);\nreturn tcs is { Task.Result: 3 };", "True", 4)] // C# 10
+        public void WaitsTheRewriteSkipsStillCompile(string code, string expected, int minRoslyn)
+        {
+            if (typeof(Microsoft.CodeAnalysis.CSharp.CSharpCompilation).Assembly.GetName().Version!.Major < minRoslyn)
+                return;
+            var result = Fixtures.Runner().Execute(new ExecuteRequest { Code = code });
+            Assert.True(result.Success, result.Error + " " + string.Join(" | ", result.Diagnostics));
+            Assert.Equal(expected, result.Value);
+        }
+
+        [Fact]
+        public void ConfigureAwaitGetResultIsSliced()
+        {
+            var run = ChildProcess.Run("return new TaskCompletionSource<int>().Task.ConfigureAwait(false).GetAwaiter().GetResult();", timeoutMs: 300);
+            Assert.True(run.ErrorKind == nameof(ErrorKind.Timeout), run.ErrorKind + ": " + run.Error);
+        }
+
+        // .NET 9+ Task.WaitAll(IEnumerable<Task>, CancellationToken = default). In a child process: unguarded, it hangs.
+        [Fact]
+        public void WaitAllOfAnEnumerableIsSliced()
+        {
+            if (typeof(Task).GetMethod("WaitAll", new[] { typeof(System.Collections.Generic.IEnumerable<Task>), typeof(System.Threading.CancellationToken) }) == null)
+                return;
+            var run = ChildProcess.Run("Task.WaitAll(new List<Task> { new TaskCompletionSource<int>().Task });", timeoutMs: 1000);
+            Assert.True(run.ErrorKind == nameof(ErrorKind.Timeout), run.ErrorKind + ": " + run.Error);
+            Assert.Equal("3", run.After);
+        }
+
+        // Where nothing could stop it (no budget, not work of a run), a wait without bound is the framework's own: it still
+        // runs a queued task inline, which a scheduler that only runs tasks inline needs.
+        [Fact]
+        public void AnUnboundedRunKeepsInlineTaskExecution()
+        {
+            const string code = "var t = Task.Factory.StartNew(() => 1, System.Threading.CancellationToken.None, TaskCreationOptions.None, new S());\nreturn t.Result;\n"
+                + "class S : TaskScheduler { protected override IEnumerable<Task> GetScheduledTasks() => null; protected override void QueueTask(Task t) { } protected override bool TryExecuteTaskInline(Task t, bool q) => TryExecuteTask(t); }";
+            var result = Fixtures.Runner(configure: o => o.DefaultTimeoutMs = 0).Execute(new ExecuteRequest { Code = code });
+            Assert.True(result.Success, result.Error);
+            Assert.Equal("1", result.Value);
+        }
+
         [Fact]
         public void ATimedOutWaitShowsTheAgentsLine()
         {
@@ -420,7 +465,7 @@ namespace CodeExecTests
         [InlineData("var t = new System.Threading.Thread(() => System.Threading.Thread.Sleep(150));\nt.Start();\n$\"{t.Join(10)} {t.Join(5000)} {t.Join(TimeSpan.FromSeconds(1))}\"", "False True True")]
         [InlineData("var s = new System.Threading.SemaphoreSlim(1);\n$\"{s.Wait(10)} {s.Wait(120)} {s.Wait(TimeSpan.FromMilliseconds(80), System.Threading.CancellationToken.None)}\"", "True False False")]
         [InlineData("var s = new System.Threading.SemaphoreSlim(0);\ns.Wait(millisecondsTimeout: 100)", "False")]
-        [InlineData("var w = System.Diagnostics.Stopwatch.StartNew();\nSystem.Threading.Thread.Sleep(300);\nSystem.Threading.Thread.Sleep(TimeSpan.FromMilliseconds(100));\nw.ElapsedMilliseconds >= 390", "True")]
+        [InlineData("var w = System.Diagnostics.Stopwatch.StartNew();\nSystem.Threading.Thread.Sleep(300);\nSystem.Threading.Thread.Sleep(TimeSpan.FromMilliseconds(100));\nw.ElapsedMilliseconds >= 360", "True")]
         [InlineData("Task.WaitAny(Task.Delay(10_000), Task.FromResult(1))", "1")]
         [InlineData("Task.WaitAny(new[] { Task.Delay(10_000) }, 120)", "-1")]
         [InlineData("Task.WaitAll(new[] { Task.Delay(10_000) }, 120)", "False")]

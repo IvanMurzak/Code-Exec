@@ -154,9 +154,15 @@ the host turns them off (`CodeRunnerOptions.ExecutionGuards`):
   `Thread.Sleep`, `Task.Wait` / `Task.WaitAll` / `Task.WaitAny`, `Task<T>.Result`, `task.GetAwaiter().GetResult()`,
   `SemaphoreSlim.Wait`, `ManualResetEventSlim.Wait`, `CountdownEvent.Wait`, `Monitor.Wait`, `WaitHandle.WaitOne` /
   `WaitAll` / `WaitAny`, in their forms without a timeout and with one (`int`, `TimeSpan`, with or without a
-  `CancellationToken`). Each becomes the guard's stand-in of the same parameters; values, exceptions, timeouts and
-  wake-ups stay the same, and a wait of at most 50 ms is the framework's own. Not covered (stopped only when the call
-  returns): such a wait with named arguments, through `?.`, `base.`, a method group or a delegate; `.NET 9`
+  `CancellationToken`; .NET 9+ `Task.WaitAll(IEnumerable<Task>)`), and `task.ConfigureAwait(b).GetAwaiter().GetResult()`.
+  Each becomes the guard's stand-in of the same parameters; values, exceptions, timeouts and wake-ups stay the same, a
+  wait that succeeded is never followed by a stop (it may have acquired a semaphore or a mutex), and a wait of at most
+  50 ms is the framework's own, as is a wait without bound where nothing could stop it (a run without budget, not work
+  of a run). One difference: under a budget, a wait without bound for a task does not run the task inline on the
+  waiting thread when it is still queued (a task only its scheduler's inline path can run, such as a
+  synchronization-context scheduler waited on from its own thread, then waits until the budget). Not covered (stopped
+  only when the call returns): such a wait with named arguments, inside a conditional access (`a?.Task.Result`), as a
+  property pattern path (`x is { Task.Result: 1 }`), through `base.`, a method group or a delegate; .NET 9+
   `Task.WaitAll` given a span; `lock` / `Monitor.Enter` and other waits (`BlockingCollection.Take`, `Barrier`,
   `SpinWait`, `Process.WaitForExit`, I/O); and every wait inside host, engine or framework code the snippet calls (an
   engine call that never returns). A native thread cannot be stopped at all.
@@ -211,24 +217,27 @@ the host turns them off (`CodeRunnerOptions.ExecutionGuards`):
   snippet's thread, and again every 100 ms while the snippet catches it: `Timeout`, `SnippetTimeout: The snippet ran
   longer than its time budget of N ms (timeoutMs) and was stopped.` plus the snippet's frames. Python delivers it
   between bytecodes: pure Python loops stop; a call into C (an engine call) finishes first, and a snippet that catches
-  `BaseException` in its loop is not stopped. At the deadline the threads the snippet started are stopped too (see
-  Threads), so a snippet waiting for one of them (`join`, `Future.result`) gets it back. A `SnippetThreadStopped` that
-  reaches the snippet that way (`Future.result` of stopped work) is reported as the `Timeout`.
+  `BaseException` in its loop is not stopped. Python 3.10 never delivers it, nor releases the GIL, in a loop whose body
+  begins with `try` or `with` (`while True: try: ...`): such a run hangs the interpreter there (3.11+ stop it). At the
+  deadline the threads the snippet started are stopped too (see Threads), so a snippet waiting for one of them
+  (`join`, `Future.result`) gets it back; a `SnippetThreadStopped` that reaches the snippet that way (`Future.result`
+  of stopped work) is reported as the `Timeout`. It needs `ctypes` (`PyThreadState_SetAsyncExc`); without it the budget
+  is not enforced. The stop is disarmed before the runner returns (the host's value converter runs unbudgeted): none
+  reaches the host afterwards.
 - **Blocking waits.** While a snippet runs, `threading.Thread.join`, `threading.Condition.wait` (and so `Event.wait`,
   `Semaphore.acquire`, `Barrier.wait`, `queue.Queue.get` / `put`, `concurrent.futures.Future.result`, pool shutdown)
-  and `time.sleep` are replaced: called from the snippet's thread or a thread it started, a wait longer than 50 ms waits
-  in slices of at most 50 ms. Between two, the snippet's thread raises its `SnippetTimeout` once the deadline has
-  passed (where the wait's lock is held again: the watchdog sends no asynchronous stop into a sliced wait), and a
-  thread the snippet started raises `SnippetThreadStopped` once the run is stopping while the agent's code is on its
-  stack. So `time.sleep(60)` with a 1 s budget stops after about 1 s; values, timeouts and wake-ups stay as Python's
-  own (`notify` cannot fall between two slices: the lock is held there). Host threads wait as before; the originals
-  are restored when no snippet runs (a host that replaced one meanwhile keeps the stand-in in its chain, which then
-  waits as Python does outside runs). Not covered (stopped only when the call returns): `Lock.acquire` /
-  `RLock.acquire` (C), `queue.SimpleQueue.get`, `select` / sockets / `subprocess` waits, `asyncio`'s event loop waiting
-  for I/O, waits inside C extensions or the engine, and `from time import sleep` bound before the run. Python 3.10 never delivers it, nor releases the GIL, in a loop
-  whose body begins with `try` or `with` (`while True: try: ...`): such a run hangs the interpreter there (3.11+ stop
-  it). It needs `ctypes` (`PyThreadState_SetAsyncExc`); without it
-  the budget is not enforced. The stop is disarmed before the runner returns: none reaches the host afterwards.
+  and `time.sleep` are replaced: called from a thread the snippet started, or from the snippet's thread when the run
+  has a budget, a finite wait longer than 50 ms (or one without bound) waits in slices of at most 50 ms. Between two,
+  the snippet's thread raises its `SnippetTimeout` once the deadline has passed (the watchdog sends no asynchronous
+  stop into a sliced wait), and a thread the snippet started raises `SnippetThreadStopped` once the run is stopping
+  while the agent's code is on its stack; a `Condition.wait` raises it only once it holds its lock again, as after any
+  wait. So `time.sleep(60)` with a 1 s budget stops after about 1 s. Values, timeouts and wake-ups stay as Python's own:
+  a sliced `Condition.wait` keeps ONE waiter for the whole wait (only the waiter lock is acquired in slices), so no
+  `notify` is lost between two slices. Host threads wait as before; the originals are restored when no snippet runs (a
+  host that replaced one meanwhile keeps the stand-in in its chain, which then waits as Python does outside runs). Not
+  covered (stopped only when the call returns): `Lock.acquire` / `RLock.acquire` (C), `queue.SimpleQueue.get`,
+  `select` / sockets / `subprocess` waits, `asyncio`'s event loop waiting for I/O, waits inside C extensions or the
+  engine, and `from time import sleep` bound before the run.
 - **Threads.** Threads the snippet starts (`threading.Thread.start`, `threading.Timer` included, called from the
   snippet's thread or from one of those threads while it runs) may not outlive it. When it ends (finished or timed
   out), a `threading.Timer` that has not fired is cancelled, and every other such thread still alive gets

@@ -272,21 +272,23 @@ internal static class __CodeExecGuard
 
     static bool Sliced(int timeout, global::System.Func<int, bool> wait)
     {
-        if (timeout < -1 || (timeout >= 0 && timeout <= SliceMs))
-            return wait(timeout); // short, or invalid: the framework's own wait (and its exception)
-        var start = global::System.Environment.TickCount;
+        // Short or invalid: the framework's own wait (and its exception). Without bound where nothing can stop it (no
+        // budget, not work of a run): the framework's own too, which may run a queued task inline (sliced waits never do).
+        if (timeout < -1 || (timeout >= 0 && timeout <= SliceMs) || (timeout == -1 && _budget <= 0 && Current() == null))
+            return wait(timeout);
+        var start = global::System.Diagnostics.Stopwatch.GetTimestamp(); // TickCount is too coarse: a sleep would end early
         for (;;)
         {
             if (timeout > 0)
             {
-                var left = timeout - unchecked(global::System.Environment.TickCount - start);
+                var elapsed = (global::System.Diagnostics.Stopwatch.GetTimestamp() - start) * 1000 / global::System.Diagnostics.Stopwatch.Frequency;
+                var left = timeout - elapsed;
                 if (left <= SliceMs)
-                    return wait(left > 0 ? left : 0);
+                    return wait(left > 0 ? (int)left : 0);
             }
-            var done = wait(SliceMs);
-            Check(); // also when the wait is over: what it waited for may have been stopped by the budget
-            if (done)
-                return true;
+            if (wait(SliceMs))
+                return true; // never a stop after the wait succeeded: it may have acquired something (a semaphore, a mutex)
+            Check();
         }
     }
 
@@ -311,7 +313,8 @@ internal static class __CodeExecGuard
     public static bool TaskWait(global::System.Threading.Tasks.Task task, int millisecondsTimeout, global::System.Threading.CancellationToken cancellationToken) => Sliced(millisecondsTimeout, ms => task.Wait(ms, cancellationToken));
 
     public static void TaskWaitAll(params global::System.Threading.Tasks.Task[] tasks) => TaskWaitAll(tasks, -1, default);
-    public static void TaskWaitAll(global::System.Collections.Generic.IEnumerable<global::System.Threading.Tasks.Task> tasks) => TaskWaitAll(new global::System.Collections.Generic.List<global::System.Threading.Tasks.Task>(tasks).ToArray(), -1, default);
+    public static void TaskWaitAll(global::System.Collections.Generic.IEnumerable<global::System.Threading.Tasks.Task> tasks, global::System.Threading.CancellationToken cancellationToken = default) =>
+        TaskWaitAll(new global::System.Collections.Generic.List<global::System.Threading.Tasks.Task>(tasks).ToArray(), -1, cancellationToken);
     public static bool TaskWaitAll(global::System.Threading.Tasks.Task[] tasks, int millisecondsTimeout) => TaskWaitAll(tasks, millisecondsTimeout, default);
     public static bool TaskWaitAll(global::System.Threading.Tasks.Task[] tasks, global::System.TimeSpan timeout) => TaskWaitAll(tasks, Ms(timeout), default);
     public static void TaskWaitAll(global::System.Threading.Tasks.Task[] tasks, global::System.Threading.CancellationToken cancellationToken) => TaskWaitAll(tasks, -1, cancellationToken);

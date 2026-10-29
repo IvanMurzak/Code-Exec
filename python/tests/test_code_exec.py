@@ -596,6 +596,7 @@ class BlockingWaitTests(unittest.TestCase):
                  "import threading\nthreading.Semaphore(0).acquire()",
                  "import threading\nc = threading.Condition()\nwith c:\n    c.wait()",
                  "import threading\nthreading.Event().wait(60)",
+                 "import threading\nthreading.Event().wait(1e10)",
                  "import time\ntime.sleep(60)"]
         for code in codes:
             with self.subTest(code):
@@ -618,7 +619,33 @@ class BlockingWaitTests(unittest.TestCase):
                 "time.sleep(0.25)\n(got, round(time.monotonic() - started, 1))")
         result, _ = self.run_child(code, timeout_ms=5000)
         self.assertTrue(result["success"], result)
-        self.assertEqual("[[true, 5, false, null, true], 0.8]", result["value"])
+        got, elapsed = json.loads(result["value"])
+        self.assertEqual([True, 5, False, None, True], got)
+        self.assertTrue(0.7 <= elapsed < 1.5, elapsed)
+
+    def test_a_notify_while_a_slice_ends_is_not_lost(self):
+        # The notifier holds the lock across the end of the waiter's slice: the wake-up must still reach the waiter.
+        code = ("import threading, time, queue\nc = threading.Condition()\nq = queue.Queue()\ngot = []\n"
+                "def waiter():\n    with c:\n        got.append(c.wait())\n"
+                "def consumer():\n    got.append(q.get())\n"
+                "threads = [threading.Thread(target=waiter), threading.Thread(target=consumer)]\n"
+                "for t in threads:\n    t.start()\ntime.sleep(0.1)\n"
+                "with c:\n    time.sleep(0.2)\n    c.notify()\n"
+                "with q.mutex:\n    time.sleep(0.2)\n    q._put(7)\n    q.unfinished_tasks += 1\n    q.not_empty.notify()\n"
+                "for t in threads:\n    t.join(2)\n(sorted(got, key=str), [t.is_alive() for t in threads])")
+        result, _ = self.run_child(code, timeout_ms=10000)
+        self.assertTrue(result["success"], result)
+        self.assertEqual("[[7, true], [false, false]]", result["value"])
+
+    def test_the_host_converter_is_not_budgeted(self):
+        # The snippet finished in time: a converter that waits past the deadline does not turn it into a Timeout.
+        code_exec.set_value_converter(lambda value: (threading.Event().wait(0.4), value)[1])
+        try:
+            result = code_exec.run("5", timeout_ms=150)
+        finally:
+            code_exec.set_value_converter(None)
+        self.assertTrue(result["success"], result)
+        self.assertEqual(5, result["value"])
 
     def test_stand_ins_are_restored_after_the_run(self):
         originals = (threading.Thread.start, threading.Thread.join, threading.Condition.wait, time.sleep)

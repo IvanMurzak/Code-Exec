@@ -6,6 +6,7 @@ import builtins
 import collections
 import io
 import json
+import _thread
 import linecache
 import operator
 import os
@@ -212,6 +213,7 @@ def _execute(result, logs, code, include, include_root, imports, include_outside
             value = eval(tail, scope) if tail is not None else None
             _make_room(saved)
             watchdog.stop()
+            threads.disarm()
         result["value"] = _convert(value)
         result["success"] = True
     except BaseException as error:  # SystemExit, KeyboardInterrupt, ...: a snippet must never take the host down
@@ -400,27 +402,44 @@ def _long(timeout):
     negative one, NaN, infinity, a type Python's own rejects) goes to Python's own wait unchanged."""
     if timeout is None:
         return True
-    return isinstance(timeout, (int, float)) and _SLICE_SECONDS < timeout < 1e9
+    return isinstance(timeout, (int, float)) and _SLICE_SECONDS < timeout < float("inf")
+
+
+def _run_to_slice(timeout):
+    """The run whose rules a wait of ``timeout`` seconds on this thread follows when it is sliced, else None: the thread
+    belongs to a run that may stop it and the wait is long (:func:`_long`)."""
+    ident = threading.get_ident()
+    run = _thread_run.get(ident) if _thread_run else None
+    return run if run is not None and _long(timeout) and run.may_stop(ident) else None
+
+
+def _slices(run, timeout, wait):
+    """Waits ``wait(seconds)`` (returns whether the wait is over; ``None`` = no bound) for at most ``timeout`` seconds
+    (``None`` = no bound) in slices of at most ``_SLICE_SECONDS``. Stops at the first slice after which the thread is due
+    a stop (:meth:`_SnippetThreads.due`). Returns ``(done, stop)``: what the last slice returned, and the stop not raised
+    yet (the caller raises it once its state is consistent again), or None."""
+    ident = threading.get_ident()
+    end = None if timeout is None else _monotonic() + timeout
+    while True:
+        if run.ended and not run.stops(ident):
+            # Its run is over and nothing of the agent's is left on its stack: wait the rest as Python does.
+            return wait(None if end is None else max(0.0, end - _monotonic())), None
+        left = _SLICE_SECONDS if end is None else max(0.0, min(_SLICE_SECONDS, end - _monotonic()))
+        done, stop = run.wait_slice(ident, wait, left)
+        if stop is not None or done or (end is not None and _monotonic() >= end):
+            return done, stop
 
 
 def _sliced(timeout, wait):
-    """A blocking wait (``wait(seconds)`` returns whether it is over; ``None`` = no bound). On a snippet's thread, a long
-    one waits in slices of at most ``_SLICE_SECONDS``: between two the thread is stopped when its run is
-    (:meth:`_SnippetThreads.check`), so a wait that never ends cannot outlast the time budget. Any other wait is Python's
-    own. Returns what the last slice returned."""
-    ident = threading.get_ident()
-    run = _thread_run.get(ident) if _thread_run else None
-    if run is None or not _long(timeout) or not run.may_stop(ident):
+    """A blocking wait on a snippet's thread, sliced (:func:`_slices`) when :func:`_run_to_slice` says so, so a wait that
+    never ends cannot outlast the time budget; any other wait is Python's own. Returns what the last slice returned."""
+    run = _run_to_slice(timeout)
+    if run is None:
         return wait(timeout)
-    end = None if timeout is None else _monotonic() + timeout
-    while True:
-        left = _SLICE_SECONDS if end is None else max(0.0, min(_SLICE_SECONDS, end - _monotonic()))
-        if run.ended and not run.stops(ident):
-            # Its run is over and nothing of the agent's is left on its stack: wait the rest as Python does.
-            return wait(None if end is None else max(0.0, end - _monotonic()))
-        done = run.wait_slice(ident, wait, left)
-        if done or (end is not None and _monotonic() >= end):
-            return done
+    done, stop = _slices(run, timeout, wait)
+    if stop is not None:
+        raise stop
+    return done
 
 
 def _sliced_sleep(seconds):
@@ -444,10 +463,31 @@ def _sliced_join(thread, timeout=None):
 
 def _sliced_wait(condition, timeout=None):
     """``threading.Condition.wait`` while snippets run (spec section 4): ``Event.wait``, ``Semaphore.acquire``,
-    ``queue.Queue.get``, ``concurrent.futures.Future.result`` and ``Barrier.wait`` wait through it. Waiting again after
-    a slice misses no ``notify``: the condition's lock is held between two slices."""
-    wait = _original("wait")
-    return _sliced(timeout, lambda left: wait(condition, left))
+    ``queue.Queue.get`` / ``put``, ``concurrent.futures.Future.result`` and ``Barrier.wait`` wait through it. Sliced, it
+    is Python's own ``Condition.wait`` with the waiter lock acquired in slices: ONE waiter for the whole wait, so a
+    ``notify`` is never lost between two slices; a stop due between two is raised once the lock is held again."""
+    run = _run_to_slice(timeout)
+    if run is None:
+        return _original("wait")(condition, timeout)
+    if not condition._is_owned():
+        raise RuntimeError("cannot wait on un-acquired lock")
+    waiter = _thread.allocate_lock()
+    waiter.acquire()
+    condition._waiters.append(waiter)
+    saved_state = condition._release_save()
+    gotit = False
+    try:
+        gotit, stop = _slices(run, timeout, lambda left: waiter.acquire() if left is None else waiter.acquire(True, left))
+    finally:  # restore state no matter what, as Python's own does
+        condition._acquire_restore(saved_state)
+        if not gotit:
+            try:
+                condition._waiters.remove(waiter)
+            except ValueError:
+                pass
+    if stop is not None:
+        raise stop
+    return gotit
 
 
 _PATCHES = {
@@ -517,7 +557,7 @@ class _SnippetThreads:
             run = run._previous.get(ident)
 
     def wait_slice(self, ident, wait, seconds):
-        """One slice of a sliced wait of thread ``ident``, then the stop it is due, if any."""
+        """One slice of a sliced wait of thread ``ident``: ``(done, the stop it is due or None)``."""
         mains = [run for run in self._chain(ident) if run.main_ident == ident]
         for run in mains:
             run.main_waiting = True
@@ -526,18 +566,23 @@ class _SnippetThreads:
         finally:
             for run in mains:
                 run.main_waiting = False
-        for run in self._chain(ident):  # also when the wait is over: what it waited for may have been stopped
-            run.check(ident)
-        return done
+        # Also when the wait is over: what it waited for may have been stopped by the deadline.
+        stop = next((stop for stop in (run.due(ident) for run in self._chain(ident)) if stop is not None), None)
+        return done, stop
 
-    def check(self, ident):
-        """Raises the stop thread ``ident`` is due between two slices of a wait: the run's timeout in its snippet's thread
-        once the deadline has passed, :class:`SnippetThreadStopped` in a thread it started once it is stopping."""
+    def due(self, ident):
+        """The stop thread ``ident`` is due between two slices of a wait, or None: the run's timeout in its snippet's
+        thread once the deadline has passed, :class:`SnippetThreadStopped` in a thread it started once it is stopping."""
         if ident == self.main_ident:
             if self.stop_type is not None and _monotonic() >= self.deadline:
-                raise self.stop_type()
+                return self.stop_type()
         elif self.stops(ident):
-            raise SnippetThreadStopped()
+            return SnippetThreadStopped()
+        return None
+
+    def disarm(self):
+        """The snippet has finished in time: what runs after it (the host's value converter) is no longer budgeted."""
+        self.stop_type = None
 
     def stops(self, ident):
         """Whether thread ``ident`` (one the run started) is to stop: the run is stopping and the agent's code is on the
