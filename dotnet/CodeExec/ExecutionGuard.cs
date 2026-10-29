@@ -131,8 +131,10 @@ internal static class __CodeExecGuard
     }
 
     /// <summary>The run new work belongs to: that of the work starting it, else the run in progress (none after it ended).</summary>
-    static Run Spawn()
+    static Run Spawn(object work)
     {
+        if (work == null)
+            return null;
         var run = _worker.Value;
         if (run == null)
         {
@@ -146,11 +148,23 @@ internal static class __CodeExecGuard
         return run;
     }
 
-    static Run Enter(Run run)
+    /// <summary>Runs work as part of its run. A void entry (a thread's) swallows a stop: unhandled there, it would end the process.</summary>
+    static void Do(Run run, global::System.Action work)
     {
         var outer = _worker.Value;
         _worker.Value = run;
-        return outer;
+        try { work(); }
+        catch (global::System.Exception) when (!Running()) { }
+        finally { Exit(run, outer); }
+    }
+
+    /// <summary>A value-returning entry (a task's) keeps the stop: the task faults with it, which ends nothing.</summary>
+    static TResult Get<TResult>(Run run, global::System.Func<TResult> work)
+    {
+        var outer = _worker.Value;
+        _worker.Value = run;
+        try { return work(); }
+        finally { Exit(run, outer); }
     }
 
     static void Exit(Run run, Run outer)
@@ -159,62 +173,26 @@ internal static class __CodeExecGuard
         global::System.Threading.Interlocked.Decrement(ref run.Pending);
     }
 
-    public static global::System.Threading.ThreadStart Worker(global::System.Threading.ThreadStart work)
-    {
-        var run = work == null ? null : Spawn();
-        if (run == null)
-            return work;
-        return () => { var outer = Enter(run); try { work(); } catch (global::System.Exception) when (!Running()) { } finally { Exit(run, outer); } };
-    }
+    public static global::System.Threading.ThreadStart Worker(global::System.Threading.ThreadStart work) =>
+        Spawn(work) is Run run ? () => Do(run, () => work()) : work;
 
-    public static global::System.Threading.ParameterizedThreadStart Worker(global::System.Threading.ParameterizedThreadStart work)
-    {
-        var run = work == null ? null : Spawn();
-        if (run == null)
-            return work;
-        return state => { var outer = Enter(run); try { work(state); } catch (global::System.Exception) when (!Running()) { } finally { Exit(run, outer); } };
-    }
+    public static global::System.Threading.ParameterizedThreadStart Worker(global::System.Threading.ParameterizedThreadStart work) =>
+        Spawn(work) is Run run ? state => Do(run, () => work(state)) : work;
 
-    public static global::System.Threading.WaitCallback Worker(global::System.Threading.WaitCallback work)
-    {
-        var run = work == null ? null : Spawn();
-        if (run == null)
-            return work;
-        return state => { var outer = Enter(run); try { work(state); } catch (global::System.Exception) when (!Running()) { } finally { Exit(run, outer); } };
-    }
+    public static global::System.Threading.WaitCallback Worker(global::System.Threading.WaitCallback work) =>
+        Spawn(work) is Run run ? state => Do(run, () => work(state)) : work;
 
-    public static global::System.Action Worker(global::System.Action work)
-    {
-        var run = work == null ? null : Spawn();
-        if (run == null)
-            return work;
-        return () => { var outer = Enter(run); try { work(); } catch (global::System.Exception) when (!Running()) { } finally { Exit(run, outer); } };
-    }
+    public static global::System.Action Worker(global::System.Action work) =>
+        Spawn(work) is Run run ? () => Do(run, work) : work;
 
-    public static global::System.Action<T> Worker<T>(global::System.Action<T> work)
-    {
-        var run = work == null ? null : Spawn();
-        if (run == null)
-            return work;
-        return state => { var outer = Enter(run); try { work(state); } catch (global::System.Exception) when (!Running()) { } finally { Exit(run, outer); } };
-    }
+    public static global::System.Action<T> Worker<T>(global::System.Action<T> work) =>
+        Spawn(work) is Run run ? state => Do(run, () => work(state)) : work;
 
-    // A value-returning entry (a task's) keeps the stop: the task faults with it, which ends nothing.
-    public static global::System.Func<TResult> Worker<TResult>(global::System.Func<TResult> work)
-    {
-        var run = work == null ? null : Spawn();
-        if (run == null)
-            return work;
-        return () => { var outer = Enter(run); try { return work(); } finally { Exit(run, outer); } };
-    }
+    public static global::System.Func<TResult> Worker<TResult>(global::System.Func<TResult> work) =>
+        Spawn(work) is Run run ? () => Get(run, work) : work;
 
-    public static global::System.Func<T, TResult> Worker<T, TResult>(global::System.Func<T, TResult> work)
-    {
-        var run = work == null ? null : Spawn();
-        if (run == null)
-            return work;
-        return state => { var outer = Enter(run); try { return work(state); } finally { Exit(run, outer); } };
-    }
+    public static global::System.Func<T, TResult> Worker<T, TResult>(global::System.Func<T, TResult> work) =>
+        Spawn(work) is Run run ? state => Get(run, () => work(state)) : work;
 
     public static unsafe void Call()
     {

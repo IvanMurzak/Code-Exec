@@ -501,6 +501,14 @@ namespace com.IvanMurzak.CodeExec
             return sb.ToString();
         }
 
+        /// <summary>The guard or one of its nested types (the closures of its thread and task wrappers).</summary>
+        static bool IsGuard(Type type)
+        {
+            while (type.DeclaringType != null)
+                type = type.DeclaringType;
+            return type.FullName == ExecutionGuard.TypeName;
+        }
+
         static void AppendException(StringBuilder sb, Exception exception, Assembly? snippet)
         {
             string message;
@@ -515,7 +523,7 @@ namespace com.IvanMurzak.CodeExec
                 foreach (var frame in new StackTrace(exception, true).GetFrames() ?? Array.Empty<StackFrame>())
                 {
                     var method = frame.GetMethod();
-                    if (method?.DeclaringType?.Assembly != snippet || method.DeclaringType.FullName == ExecutionGuard.TypeName)
+                    if (method?.DeclaringType?.Assembly != snippet || IsGuard(method.DeclaringType))
                         continue;
                     var line = "   at " + method.DeclaringType.FullName + "." + method.Name;
                     var file = frame.GetFileName();

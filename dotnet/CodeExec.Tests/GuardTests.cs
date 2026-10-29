@@ -256,6 +256,16 @@ namespace CodeExecTests
         }
 
         [Fact]
+        public void WorkerFramesAreNotTheAgents()
+        {
+            var result = Fixtures.Runner().Execute(new ExecuteRequest { Code = "Task.Run(() => { throw new InvalidOperationException(\"w\"); }).Wait();" });
+            Assert.Equal(ErrorKind.Runtime, result.ErrorKind);
+            Assert.Contains("InvalidOperationException: w", result.Error);
+            Assert.Contains("snippet.cs:line 1", result.Error);
+            Assert.DoesNotContain(ExecutionGuard.TypeName, result.Error);
+        }
+
+        [Fact]
         public void UnfinishedWorkIsReportedAsAWarning()
         {
             var result = Fixtures.Runner().Execute(new ExecuteRequest { Code = "new System.Threading.Thread(() => { while (true) { } }) { IsBackground = true }.Start();\n1" });
