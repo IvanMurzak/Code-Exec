@@ -235,63 +235,69 @@ namespace com.IvanMurzak.CodeExec.Roslyn
         };
 
         /// <summary>
-        /// A delegate handed to a thread or task start becomes <c>Worker((T)(delegate))</c> (<see cref="ExecutionGuard.Worker"/>),
-        /// cast to the delegate type it already converts to, so overload resolution picks the same method: the work then
-        /// belongs to the run and stops once the run has ended. Not inside an expression tree or a query.
+        /// A delegate handed to a thread start becomes <c>Worker((T)(delegate))</c> (<see cref="ExecutionGuard.Worker"/>), one
+        /// handed to a task start <c>TaskWorker((T)(delegate))</c>, cast to the delegate type it already converts to, so
+        /// overload resolution picks the same method: the work then belongs to the run and stops once the run has ended.
+        /// Not inside an expression tree or a query.
         /// </summary>
         static void Workers(ExpressionSyntax call, ArgumentListSyntax arguments, Semantics semantics, List<Edit> edits)
         {
-            if (semantics.HasErrors || !(semantics.Model.GetSymbolInfo(call).Symbol is IMethodSymbol method) || !StartsWork(method))
+            if (semantics.HasErrors || !(semantics.Model.GetSymbolInfo(call).Symbol is IMethodSymbol method) || !(StartsWork(method) is bool task))
                 return;
             foreach (var outer in call.Ancestors())
             {
                 if (outer is QueryExpressionSyntax || (outer is AnonymousFunctionExpressionSyntax function && !semantics.IsDelegate(function)))
                     return;
             }
+            var entry = task ? ExecutionGuard.TaskWorker : ExecutionGuard.Worker;
             foreach (var argument in arguments.Arguments)
             {
                 var expression = argument.Expression;
                 if (!argument.RefKindKeyword.IsKind(SyntaxKind.None) || !(semantics.Model.GetTypeInfo(expression).ConvertedType is INamedTypeSymbol type)
-                    || !IsWorkDelegate(type) || !CanBeNamed(type))
+                    || !IsWorkDelegate(type, task) || !CanBeNamed(type))
                     continue;
                 var cast = type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
-                edits.Add(new Edit(expression.SpanStart, ExecutionGuard.Worker + "((" + cast + ")(", expression.SpanStart, edits.Count));
+                edits.Add(new Edit(expression.SpanStart, entry + "((" + cast + ")(", expression.SpanStart, edits.Count));
                 edits.Add(new Edit(expression.Span.End, "))", expression.Span.End, edits.Count, closer: true));
             }
         }
 
-        static bool StartsWork(IMethodSymbol method)
+        /// <summary>Whether the method starts work: true for a task start, false for a thread start, null for neither.</summary>
+        static bool? StartsWork(IMethodSymbol method)
         {
             switch (method.ContainingType?.OriginalDefinition.ToDisplayString())
             {
                 case "System.Threading.Thread":
-                case "System.Threading.Tasks.Task<TResult>":
-                    return method.MethodKind == MethodKind.Constructor;
-                case "System.Threading.Tasks.Task":
-                    return method.MethodKind == MethodKind.Constructor || method.Name == "Run";
+                    return method.MethodKind == MethodKind.Constructor ? false : (bool?)null;
                 case "System.Threading.ThreadPool":
-                    return method.Name == "QueueUserWorkItem" || method.Name == "UnsafeQueueUserWorkItem";
+                    return method.Name == "QueueUserWorkItem" || method.Name == "UnsafeQueueUserWorkItem" ? false : (bool?)null;
+                case "System.Threading.Tasks.Task<TResult>":
+                    return method.MethodKind == MethodKind.Constructor ? true : (bool?)null;
+                case "System.Threading.Tasks.Task":
+                    return method.MethodKind == MethodKind.Constructor || method.Name == "Run" ? true : (bool?)null;
                 case "System.Threading.Tasks.TaskFactory":
                 case "System.Threading.Tasks.TaskFactory<TResult>":
-                    return method.Name == "StartNew";
+                    return method.Name == "StartNew" ? true : (bool?)null;
                 default:
-                    return false;
+                    return null;
             }
         }
 
-        /// <summary>The delegate types <see cref="ExecutionGuard.Worker"/> has an overload for.</summary>
-        static bool IsWorkDelegate(INamedTypeSymbol type)
+        /// <summary>The delegate types <see cref="ExecutionGuard.Worker"/> (thread starts) or <see cref="ExecutionGuard.TaskWorker"/> have an overload for.</summary>
+        static bool IsWorkDelegate(INamedTypeSymbol type, bool task)
         {
             switch (type.OriginalDefinition.ToDisplayString())
             {
+                case "System.Action<T>":
+                    return true;
                 case "System.Threading.ThreadStart":
                 case "System.Threading.ParameterizedThreadStart":
                 case "System.Threading.WaitCallback":
+                    return !task;
                 case "System.Action":
-                case "System.Action<T>":
                 case "System.Func<TResult>":
                 case "System.Func<T, TResult>":
-                    return true;
+                    return task;
                 default:
                     return false;
             }

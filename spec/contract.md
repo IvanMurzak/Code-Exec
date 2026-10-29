@@ -155,18 +155,24 @@ the host turns them off (`CodeRunnerOptions.ExecutionGuards`):
   catch-all would hide: `CS0160`).
 - **Threads and tasks.** A delegate the agent's code hands to `new Thread(...)`, `ThreadPool.QueueUserWorkItem` /
   `UnsafeQueueUserWorkItem`, `Task.Run`, `Task.Factory.StartNew` (any `TaskFactory.StartNew`) or `new Task(...)` belongs
-  to the run: so does what it starts in turn and its asynchronous continuations. It runs under the same guards and,
-  once the run has ended (finished or timed out), stops at its next check with
+  to the run, and so do the threads and tasks it starts the same way. It runs under the same guards and, once the run
+  has ended (finished or timed out), stops at its next check with
   `System.TimeoutException: The snippet's run has ended, so this thread or task it started was stopped: ...`. It passes
   the agent's catch clauses like any stop. A thread or thread-pool entry swallows a stop (an exception left unhandled
-  on a thread would end the process); a task faults with it. A budget spent inside such work while the snippet waited
-  for it (`Join`, `Wait`) makes the run a `Timeout` too. When work of the run had not finished as it ended, the
-  response gets one `warning` log entry: `N thread(s) or task(s) the snippet started had not finished when it ended:
-  they are stopped at their next loop iteration or call. Join or await work the snippet starts.` Not covered: timers
-  (`System.Threading.Timer`, `System.Timers.Timer`, engine timers) and other callbacks, which may outlive the run on
-  purpose; work blocked in a wait or a host call (it stops once that returns); threads started by native code or by
-  host code the snippet calls; a delegate stored first and started later through another API; and work that a callback
-  left behind starts after the run (it is the callback's own).
+  on a thread would end the process); a task faults with it. Asynchronous task work (`Task.Run(async () => ...)`)
+  belongs to the run until its task ends, across its awaits. A stop inside such work while the snippet waited for it
+  (`Join`, `Wait`) ends the run too: `Timeout` for the budget, `Runtime` (`Recursion too deep`) for the stack. When
+  work of the run had not finished as it ended, the response gets one `warning` log entry: `N thread(s) or task(s) the
+  snippet started had not finished when it ended: they are stopped at their next loop iteration or call. Join or await
+  work the snippet starts.` (work created but never started counts too). Not covered, so it may outlive the run: timers
+  (`System.Threading.Timer`, `System.Timers.Timer`, engine timers) and other callbacks; an `async void` delegate's code
+  after its first `await` (`new Thread(async () => ...)`); work blocked in a wait or a host call (it stops once that
+  returns); threads started by native code or by host code the snippet calls; a start written through an alias of
+  `Thread` / `Task`, inside a query expression, or whose delegate type cannot be named (an anonymous type); a delegate
+  stored first and started later through another API; and work that a callback left behind starts after the run (it
+  is the callback's own). Caveat: a timer or other callback created inside asynchronous task work inherits the run
+  through its execution context; its code is stopped like the task's, and an exception unhandled in a timer callback
+  ends the process.
 - **After the run.** A run that finished lifts the time budget: callbacks it left behind (events, stored delegates)
   keep only the stack check. A timed-out run keeps its stop, so what still runs of it (an asynchronous continuation,
   a thread it started) stops at its next check; on a host that cannot unload (Mono), its assembly is not reused.
@@ -199,14 +205,16 @@ the host turns them off (`CodeRunnerOptions.ExecutionGuards`):
 - **Threads.** Threads the snippet starts (`threading.Thread.start`, `threading.Timer` included, called from the
   snippet's thread or from one of those threads while it runs) may not outlive it. When it ends (finished or timed
   out), a `threading.Timer` that has not fired is cancelled, and every other such thread still alive gets
-  `code_exec.SnippetThreadStopped` (a `BaseException`, the same mechanism as the time budget) while it runs the
-  snippet's or an include's code, again every 100 ms while it does. The thread ends quietly (nothing is printed). One
-  `warning` log entry counts them: `N thread(s) the snippet started were still running when it ended: each is stopped
-  while it runs the snippet's code. Join threads before the snippet returns.` A thread that waits in library or host code
-  (a `concurrent.futures` worker waiting for work, `time.sleep`) is left alone until it runs the snippet's code again;
-  one that catches `BaseException` every time is not stopped. Not covered: `_thread.start_new_thread`, threads started
-  by C code or by host code the snippet calls, and threads started by the snippet's threads after it has ended. Needs
-  `ctypes`, like the time budget.
+  `code_exec.SnippetThreadStopped` (a `BaseException`, the same mechanism as the time budget) whenever the snippet's or
+  an include's code is what it runs, checked every 100 ms while such code is on its stack. The thread ends quietly
+  (nothing is printed). One `warning` log entry counts the threads still running (cancelled timers aside): `N thread(s)
+  the snippet started were still running when it ended: each is stopped while it runs the snippet's code. Join threads
+  before the snippet returns.` A thread inside library or host code (`queue.get`) gets no stop until it returns to the
+  snippet's code; one with none of it left on its stack (a `concurrent.futures` worker waiting for work) is left alone
+  from then on; one that catches `BaseException` every time is not stopped. `threading.Thread.start` is replaced only
+  while a snippet runs. Not covered: `_thread.start_new_thread`, threads started by C code, and threads started by the
+  snippet's threads after it has ended. Threads that host code starts while the snippet calls it count as the
+  snippet's. Needs `ctypes`, like the time budget.
 - **Recursion** ends with Python's own `RecursionError` (`Runtime`) at the interpreter's recursion limit. Python 3.11 and
   older do not check the C stack: past a few thousand, a raised limit lets C-level recursion (`repr` / `json.dumps` of a
   deeply nested list) overflow it, which ends the host. So on Python < 3.12 a snippet's (and its includes')

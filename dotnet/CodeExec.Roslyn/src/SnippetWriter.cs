@@ -39,12 +39,15 @@ namespace com.IvanMurzak.CodeExec.Roslyn
             public bool HasOtherReturns { get; }
         }
 
-        public static Output Write(string code, IReadOnlyList<string> usings, IReadOnlyList<ParameterDeclaration> parameters, bool returnLastExpression)
+        public static Output Write(string code, IReadOnlyList<string> usings, IReadOnlyList<ParameterDeclaration> parameters, bool returnLastExpression) =>
+            Write(code, usings, parameters, returnLastExpression, findDeclarations: true);
+
+        static Output Write(string code, IReadOnlyList<string> usings, IReadOnlyList<ParameterDeclaration> parameters, bool returnLastExpression, bool findDeclarations)
         {
             var scriptOptions = new CSharpParseOptions(LanguageVersion.Latest, DocumentationMode.None, SourceCodeKind.Script);
             // Script code takes a top-level `using` as a directive: the `[await] using` of each top-level using declaration
             // is blanked out before parsing (positions stay) and put back when its declaration is written.
-            var declarations = UsingDeclarations(code, scriptOptions);
+            var declarations = findDeclarations ? UsingDeclarations(code, scriptOptions) : new Dictionary<int, UsingDeclaration>();
             var parsed = code;
             if (declarations.Count > 0)
             {
@@ -78,6 +81,9 @@ namespace com.IvanMurzak.CodeExec.Roslyn
                 else
                     topLevel.Add(member);
             }
+            // A declaration that did not become a statement (`using readonly T x = ...;`) keeps its `using`: its error is the agent's.
+            if (declarations.Keys.Any(start => !body.Any(b => b.Node.SpanStart == start)))
+                return Write(code, usings, parameters, returnLastExpression, findDeclarations: false);
 
             var sb = new StringBuilder();
             foreach (var e in root.Externs) // extern aliases must precede every using, global usings every other one
@@ -221,13 +227,16 @@ namespace com.IvanMurzak.CodeExec.Roslyn
         }
 
         /// <summary>Whether the tokens after a statement-starting <c>using</c> (from <paramref name="at"/>) declare variables.</summary>
+        /// <remarks>
+        /// <c>Type name =</c>: the variable's name right before the first <c>=</c> outside brackets, a type before it with no
+        /// two names in a row (<c>using System</c> missing its <c>;</c> before <c>var x = 1;</c> stays a directive). A keyword
+        /// other than a predefined type (<c>static</c>, <c>unsafe</c>, a modifier) means a directive or invalid code.
+        /// </remarks>
         static bool IsDeclaration(List<SyntaxToken> tokens, int at)
         {
             var next = tokens[at].Kind();
-            if (next == SyntaxKind.OpenParenToken || next == SyntaxKind.StaticKeyword || next == SyntaxKind.UnsafeKeyword)
+            if (next == SyntaxKind.OpenParenToken || (SyntaxFacts.IsKeywordKind(next) && !SyntaxFacts.IsPredefinedType(next)))
                 return false;
-            if (next == SyntaxKind.IdentifierToken && at + 1 < tokens.Count && tokens[at + 1].IsKind(SyntaxKind.EqualsToken))
-                return false; // `using A = B;`
             var depth = 0;
             for (var i = at; i < tokens.Count; i++)
             {
@@ -242,7 +251,7 @@ namespace com.IvanMurzak.CodeExec.Roslyn
                         depth--;
                         break;
                     case SyntaxKind.EqualsToken when depth == 0:
-                        return true;
+                        return i - 1 > at && tokens[i - 1].IsKind(SyntaxKind.IdentifierToken) && !HasAdjacentNames(tokens, at, i - 1);
                     case SyntaxKind.SemicolonToken:
                     case SyntaxKind.OpenBraceToken:
                     case SyntaxKind.CloseBraceToken:
@@ -252,6 +261,17 @@ namespace com.IvanMurzak.CodeExec.Roslyn
             }
             return false;
         }
+
+        /// <summary>Two names in a row in tokens [<paramref name="from"/>, <paramref name="to"/>): not one type.</summary>
+        static bool HasAdjacentNames(List<SyntaxToken> tokens, int from, int to)
+        {
+            for (var i = from + 1; i < to; i++)
+                if (IsName(tokens[i - 1]) && IsName(tokens[i]))
+                    return true;
+            return false;
+        }
+
+        static bool IsName(SyntaxToken token) => token.IsKind(SyntaxKind.IdentifierToken) || SyntaxFacts.IsPredefinedType(token.Kind());
 
         static bool IsGlobal(UsingDirectiveSyntax u) => u.GetFirstToken().IsKind(SyntaxKind.GlobalKeyword);
 

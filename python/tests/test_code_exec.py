@@ -493,8 +493,35 @@ class SnippetThreadTests(unittest.TestCase):
         code = "import sys, threading\nthreading.Timer(0.3, lambda: setattr(sys, '_code_exec_timer_fired', True)).start()"
         result = code_exec.run(code)
         self.assertTrue(result["success"], result)
+        self.assertEqual([], result["logs"])  # a cancelled timer is not counted as still running
         time.sleep(0.6)
         self.assertFalse(hasattr(sys, "_code_exec_timer_fired"))
+
+    def test_a_thread_subclass_that_raises_does_not_keep_the_host_state_from_being_restored(self):
+        limit, path = sys.getrecursionlimit(), list(sys.path)
+        code = ("import sys, threading\nsys.setrecursionlimit(1234)\nclass T(threading.Timer):\n"
+                "    def cancel(self):\n        raise RuntimeError('boom')\n"
+                "    def is_alive(self):\n        raise RuntimeError('boom')\nT(5, print).start()\n1")
+        result = code_exec.run(code)
+        self.assertTrue(result["success"], result)
+        self.assertEqual((limit, path), (sys.getrecursionlimit(), sys.path))
+
+    def test_nested_run_on_a_snippet_thread_restores_thread_start(self):
+        original = threading.Thread.start
+        code = ("import threading, time, code_exec\ndef inner():\n    code_exec.run('import time\\ntime.sleep(0.6)')\n"
+                "threading.Thread(target=inner, name='ce-nested', daemon=True).start()\ntime.sleep(0.2)\n1")
+        result = code_exec.run(code)
+        self.assertTrue(result["success"], result)
+        self.assertEqual(1, len(result["logs"]), result["logs"])
+        self.assertTrue(result["logs"][0]["message"].startswith("1 thread(s)"))
+        self.assertTrue(self.wait_gone("ce-nested"))
+        self.assertIs(original, threading.Thread.start)
+
+    def test_a_thread_started_twice_is_counted_once(self):
+        code = ("import threading, time\nt = threading.Thread(target=time.sleep, args=(0.5,))\nt.start()\n"
+                "try:\n    t.start()\nexcept RuntimeError:\n    pass\n1")
+        result = code_exec.run(code)
+        self.assertTrue(result["logs"][0]["message"].startswith("1 thread(s)"), result["logs"])
 
     def test_joined_threads_and_host_threads_are_left_alone(self):
         result = code_exec.run("import threading\nt = threading.Thread(target=lambda: None)\nt.start()\nt.join()\n1")

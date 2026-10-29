@@ -317,6 +317,17 @@ namespace CodeExecTests
             Assert.Equal(("CS0103", "snippet.cs", line, column), (d.Id, d.File, d.Line, d.Column));
         }
 
+        // Invalid code keeps its own errors: no `using` is dropped, a directive missing its `;` stays a directive.
+        [Theory]
+        [InlineData("using readonly System.IO.StringWriter w = new System.IO.StringWriter();\n1", "CS1041", 1, 6)]
+        [InlineData("using System\nvar x = 1;\nx", "CS1002", 1, 13)]
+        public void InvalidUsingsKeepTheirOwnErrors(string code, string id, int line, int column)
+        {
+            var result = Fixtures.Runner().Execute(new ExecuteRequest { Code = code, AutoImport = false });
+            Assert.Equal(ErrorKind.Compile, result.ErrorKind);
+            Assert.Contains(result.Diagnostics, d => d.Id == id && d.Line == line && d.Column == column);
+        }
+
         [Fact]
         public void GlobalUsingGoesBeforeTheRuntimesUsings()
         {

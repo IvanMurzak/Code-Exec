@@ -776,11 +776,15 @@ namespace com.IvanMurzak.CodeExec
                 object? value = null;
                 try
                 {
-                    // The budget ran out in a thread or task the snippet started while the snippet itself waited (Join,
-                    // Wait): that work was stopped, so the run is no success either.
-                    if (_errorKind == ErrorKind.None && _guard != null && ExecutionGuard.Stopped(_guard) == ExecutionGuard.StoppedByTime)
+                    // A guard stopped a thread the snippet started while the snippet itself waited for it (Join): the thread
+                    // swallowed the stop, but the run is no success either.
+                    var stopped = _errorKind == ErrorKind.None && _guard != null ? ExecutionGuard.Stopped(_guard) : 0;
+                    if (stopped == ExecutionGuard.StoppedByTime)
                         Fail(ErrorKind.Timeout, $"System.TimeoutException: The snippet ran longer than its time budget of {_budgetMs} ms (timeoutMs); "
                             + "a thread or task it started was stopped.");
+                    else if (stopped != 0)
+                        Fail(ErrorKind.Runtime, "System.InsufficientExecutionStackException: Recursion too deep in a thread the snippet started: "
+                            + "it was stopped before a stack overflow could end the host process; bound the recursion depth or use a loop.");
                     if (_errorKind == ErrorKind.None)
                         value = _runner._options.ValueConverter(Result());
                 }

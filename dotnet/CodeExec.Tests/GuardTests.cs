@@ -233,6 +233,8 @@ namespace CodeExecTests
         [InlineData("var t = Task.Run(async () => { while (true) await Task.Yield(); });\nreturn (Func<bool>)(() => ((IAsyncResult)t).AsyncWaitHandle.WaitOne(10_000));")]
         [InlineData("var t = Task.Factory.StartNew(() => { while (true) { } }, TaskCreationOptions.LongRunning);\nreturn (Func<bool>)(() => ((IAsyncResult)t).AsyncWaitHandle.WaitOne(10_000));")]
         [InlineData("var t = new Task(() => { while (true) { } });\nt.Start();\nreturn (Func<bool>)(() => ((IAsyncResult)t).AsyncWaitHandle.WaitOne(10_000));")]
+        // Asynchronous task work belongs to the run until its task ends, also when its first await returned before the run ended.
+        [InlineData("var t = Task.Run(async () => { await Task.Delay(200); while (true) { } });\nSystem.Threading.Thread.Sleep(50);\nreturn (Func<bool>)(() => ((IAsyncResult)t).AsyncWaitHandle.WaitOne(10_000));")]
         // Started by work the run started: it belongs to the same run.
         [InlineData("var inner = new TaskCompletionSource<Task>();\nTask.Run(() => inner.SetResult(Task.Run(() => { while (true) { } })));\nvar t = inner.Task.Result;\nreturn (Func<bool>)(() => ((IAsyncResult)t).AsyncWaitHandle.WaitOne(10_000));")]
         // Caught: the stop passes the agent's catch-all.
@@ -248,11 +250,22 @@ namespace CodeExecTests
         [Theory]
         [InlineData("var t = new System.Threading.Thread(() => { while (true) { } });\nt.Start();\nt.Join();\n1")]
         [InlineData("Task.Run(() => { while (true) { } }).ContinueWith(_ => { }).Wait();\n1")]
+        // A void task entry faults with the stop (only thread entries swallow it): the snippet does not carry on after Wait.
+        [InlineData("var stop = false;\nTask.Run(() => { while (!stop) { } }).Wait();\nConsole.WriteLine(\"after\");")]
         public void BudgetSpentInWorkTheSnippetWaitsForIsATimeout(string code)
         {
             var result = Fixtures.Runner().Execute(new ExecuteRequest { Code = code, TimeoutMs = 300 });
             Assert.True(ErrorKind.Timeout == result.ErrorKind, $"{result.ErrorKind}: {result.Error}");
-            Assert.StartsWith("System.TimeoutException: The snippet ran longer than its time budget of 300 ms (timeoutMs)", result.Error);
+            Assert.Contains("The snippet ran longer than its time budget of 300 ms (timeoutMs)", result.Error);
+            Assert.DoesNotContain(result.Logs, l => l.Message == "after");
+        }
+
+        [Fact]
+        public void RecursionStoppedInAThreadTheSnippetWaitsForIsAnError()
+        {
+            var result = Fixtures.Runner().Execute(new ExecuteRequest { Code = "int R(int n) => R(n + 1) + 1;\nvar t = new System.Threading.Thread(() => { R(0); });\nt.Start();\nt.Join();\nreturn 5;" });
+            Assert.Equal(ErrorKind.Runtime, result.ErrorKind);
+            Assert.StartsWith("System.InsufficientExecutionStackException: Recursion too deep", result.Error);
         }
 
         [Fact]
@@ -279,6 +292,11 @@ namespace CodeExecTests
         [Theory]
         [InlineData("new System.Threading.Thread(() => { while (true) { } }).Start();\nwhile (true) { }", "Timeout")]
         [InlineData("System.Threading.ThreadPool.QueueUserWorkItem(_ => { while (true) { } });\nwhile (true) { }", "Timeout")]
+        // Nothing but the work itself carries the run: an async void continuation or a timer the work created is not
+        // stopped (an exception unhandled there would end the process).
+        [InlineData("new System.Threading.Thread(() => System.Threading.Thread.Sleep(3000)) { IsBackground = true }.Start();\nnew System.Threading.Thread(async () => { await Task.Delay(100); for (var i = 0; i < 1000; i++) { } }) { IsBackground = true }.Start();\n1", "None")]
+        [InlineData("new System.Threading.Thread(() => System.Threading.Thread.Sleep(3000)) { IsBackground = true }.Start();\nSystem.Threading.ThreadPool.QueueUserWorkItem(async _ => { await Task.Delay(100); for (var i = 0; i < 1000; i++) { } });\n1", "None")]
+        [InlineData("class Keep { public static object T; }\nnew System.Threading.Thread(() => System.Threading.Thread.Sleep(3000)) { IsBackground = true }.Start();\nTask.Run(() => { Keep.T = new System.Threading.Timer(_ => { for (int i = 0; i < 10; i++) { } }, null, 300, 100); }).Wait();\n1", "None")]
         // A foreground thread left spinning would also keep the process from exiting.
         [InlineData("new System.Threading.Thread(() => { while (true) { } }).Start();\n1", "None")]
         public void StoppedThreadsNeverEndTheProcess(string code, string kind)
