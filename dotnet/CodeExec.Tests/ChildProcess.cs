@@ -22,8 +22,12 @@ namespace CodeExecTests
                 return 2;
             }
             var code = Encoding.UTF8.GetString(Convert.FromBase64String(args[1]));
-            var result = Fixtures.Runner().Execute(new ExecuteRequest { Code = code, TimeoutMs = int.Parse(args[2]) });
-            Console.Out.Write(result.ErrorKind + "\n" + result.Error);
+            var runner = Fixtures.Runner();
+            var result = runner.Execute(new ExecuteRequest { Code = code, TimeoutMs = int.Parse(args[2]) });
+            // The process stays usable: another snippet (with a wait and a loop of its own) runs normally afterwards.
+            var after = runner.Execute(new ExecuteRequest { Code = "System.Threading.Thread.Sleep(100);\nvar s = 0;\nfor (var i = 0; i < 3; i++) s += i;\ns", TimeoutMs = 10_000 });
+            var afterText = after.Success ? Convert.ToString(after.Value) : after.ErrorKind + ": " + after.Error;
+            Console.Out.Write(result.ErrorKind + "\n" + result.ExecuteMs + "\n" + afterText?.Replace("\n", " ") + "\n" + result.Error);
             Console.Out.Flush();
             System.Threading.Thread.Sleep(int.Parse(args[3])); // what the snippet left running gets the time to end the process
             return 0;
@@ -34,6 +38,16 @@ namespace CodeExecTests
         /// snippet left running ends it within <paramref name="lingerMs"/> or keeps it from exiting.
         /// </summary>
         public static (string ErrorKind, string Error) Execute(string code, int timeoutMs = 0, int lingerMs = 0)
+        {
+            var run = Run(code, timeoutMs, lingerMs);
+            return (run.ErrorKind, run.Error);
+        }
+
+        /// <summary>
+        /// Like <see cref="Execute"/>, plus how long the snippet ran (<see cref="ExecuteResult.ExecuteMs"/>) and what a
+        /// snippet run after it in the same process returned (<c>3</c> when the process is still usable).
+        /// </summary>
+        public static (string ErrorKind, string Error, long ExecuteMs, string After) Run(string code, int timeoutMs = 0, int lingerMs = 0)
         {
             // The build output, not Assembly.Location: the .NET Framework test host runs a shadow copy without its dependencies.
             var assembly = Fixtures.Path(typeof(ChildProcess).Assembly.GetName().Name + ".dll");
@@ -60,10 +74,10 @@ namespace CodeExecTests
                 throw new TimeoutException("the child process did not end within 120 s");
             }
             var stdout = output.Result;
-            var split = stdout.IndexOf('\n');
-            if (process.ExitCode != 0 || split < 0)
+            var lines = stdout.Split(new[] { '\n' }, 4);
+            if (process.ExitCode != 0 || lines.Length < 4)
                 throw new InvalidOperationException($"the child process ended with exit code {process.ExitCode}: {stdout} {stderr.Result}");
-            return (stdout.Substring(0, split), stdout.Substring(split + 1));
+            return (lines[0], lines[3], long.Parse(lines[1]), lines[2]);
         }
     }
 }

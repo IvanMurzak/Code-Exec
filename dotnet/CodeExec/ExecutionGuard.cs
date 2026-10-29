@@ -21,6 +21,15 @@ namespace com.IvanMurzak.CodeExec
         /// <summary>The guard type in the snippet's assembly (global namespace).</summary>
         public const string TypeName = "__CodeExecGuard";
 
+        /// <summary>
+        /// The guard type as inserted code names it. A blocking wait the agent's code writes (<c>Thread.Join</c>,
+        /// <c>Thread.Sleep</c>, <c>Task.Wait</c> / <c>WaitAll</c> / <c>WaitAny</c> / <c>Result</c> /
+        /// <c>GetAwaiter().GetResult()</c>, <c>SemaphoreSlim</c> / <c>ManualResetEventSlim</c> / <c>CountdownEvent.Wait</c>,
+        /// <c>Monitor.Wait</c>, <c>WaitHandle.WaitOne</c> / <c>WaitAll</c> / <c>WaitAny</c>) becomes a call of the guard's
+        /// stand-in of the same name and parameters (the receiver first), which waits in slices with a check between two.
+        /// </summary>
+        public const string QualifiedName = "global::" + TypeName;
+
         /// <summary>The file name the guard source compiles under (never shown to the agent).</summary>
         public const string FileName = "<guard>";
 
@@ -256,6 +265,123 @@ internal static class __CodeExecGuard
 
     public static global::System.Func<T, TResult> TaskWorker<T, TResult>(global::System.Func<T, TResult> work) =>
         Spawn(work) is Run run ? state => Get(run, () => work(state)) : work;
+
+    // Blocking waits the agent's code writes (Join, Wait, Sleep, ...) wait in slices of at most SliceMs, with a clock
+    // check between two: a wait that never ends stops at the budget, and work of an ended run stops in it too.
+    const int SliceMs = 50;
+
+    static bool Sliced(int timeout, global::System.Func<int, bool> wait)
+    {
+        if (timeout < -1 || (timeout >= 0 && timeout <= SliceMs))
+            return wait(timeout); // short, or invalid: the framework's own wait (and its exception)
+        var start = global::System.Environment.TickCount;
+        for (;;)
+        {
+            if (timeout > 0)
+            {
+                var left = timeout - unchecked(global::System.Environment.TickCount - start);
+                if (left <= SliceMs)
+                    return wait(left > 0 ? left : 0);
+            }
+            var done = wait(SliceMs);
+            Check(); // also when the wait is over: what it waited for may have been stopped by the budget
+            if (done)
+                return true;
+        }
+    }
+
+    /// <summary>A TimeSpan timeout in ms; -2 when out of range (the framework's own wait throws for it).</summary>
+    static int Ms(global::System.TimeSpan timeout)
+    {
+        var ms = (long)timeout.TotalMilliseconds;
+        return ms >= -1 && ms <= int.MaxValue ? (int)ms : -2;
+    }
+
+    public static void Join(global::System.Threading.Thread thread) => Sliced(-1, ms => thread.Join(ms));
+    public static bool Join(global::System.Threading.Thread thread, int millisecondsTimeout) => Sliced(millisecondsTimeout, ms => thread.Join(ms));
+    public static bool Join(global::System.Threading.Thread thread, global::System.TimeSpan timeout) => Sliced(Ms(timeout), ms => thread.Join(ms));
+
+    public static void Sleep(int millisecondsTimeout) => Sliced(millisecondsTimeout, ms => { global::System.Threading.Thread.Sleep(ms); return false; });
+    public static void Sleep(global::System.TimeSpan timeout) => Sleep(Ms(timeout));
+
+    public static void TaskWait(global::System.Threading.Tasks.Task task) => Sliced(-1, ms => task.Wait(ms));
+    public static bool TaskWait(global::System.Threading.Tasks.Task task, int millisecondsTimeout) => Sliced(millisecondsTimeout, ms => task.Wait(ms));
+    public static bool TaskWait(global::System.Threading.Tasks.Task task, global::System.TimeSpan timeout) => Sliced(Ms(timeout), ms => task.Wait(ms));
+    public static void TaskWait(global::System.Threading.Tasks.Task task, global::System.Threading.CancellationToken cancellationToken) => Sliced(-1, ms => task.Wait(ms, cancellationToken));
+    public static bool TaskWait(global::System.Threading.Tasks.Task task, int millisecondsTimeout, global::System.Threading.CancellationToken cancellationToken) => Sliced(millisecondsTimeout, ms => task.Wait(ms, cancellationToken));
+
+    public static void TaskWaitAll(params global::System.Threading.Tasks.Task[] tasks) => Sliced(-1, ms => global::System.Threading.Tasks.Task.WaitAll(tasks, ms));
+    public static void TaskWaitAll(global::System.Collections.Generic.IEnumerable<global::System.Threading.Tasks.Task> tasks) => TaskWaitAll(new global::System.Collections.Generic.List<global::System.Threading.Tasks.Task>(tasks).ToArray());
+    public static bool TaskWaitAll(global::System.Threading.Tasks.Task[] tasks, int millisecondsTimeout) => Sliced(millisecondsTimeout, ms => global::System.Threading.Tasks.Task.WaitAll(tasks, ms));
+    public static bool TaskWaitAll(global::System.Threading.Tasks.Task[] tasks, global::System.TimeSpan timeout) => Sliced(Ms(timeout), ms => global::System.Threading.Tasks.Task.WaitAll(tasks, ms));
+    public static void TaskWaitAll(global::System.Threading.Tasks.Task[] tasks, global::System.Threading.CancellationToken cancellationToken) => Sliced(-1, ms => global::System.Threading.Tasks.Task.WaitAll(tasks, ms, cancellationToken));
+    public static bool TaskWaitAll(global::System.Threading.Tasks.Task[] tasks, int millisecondsTimeout, global::System.Threading.CancellationToken cancellationToken) => Sliced(millisecondsTimeout, ms => global::System.Threading.Tasks.Task.WaitAll(tasks, ms, cancellationToken));
+
+    public static int TaskWaitAny(params global::System.Threading.Tasks.Task[] tasks) => TaskWaitAny(tasks, -1, default);
+    public static int TaskWaitAny(global::System.Threading.Tasks.Task[] tasks, int millisecondsTimeout) => TaskWaitAny(tasks, millisecondsTimeout, default);
+    public static int TaskWaitAny(global::System.Threading.Tasks.Task[] tasks, global::System.TimeSpan timeout) => TaskWaitAny(tasks, Ms(timeout), default);
+    public static int TaskWaitAny(global::System.Threading.Tasks.Task[] tasks, global::System.Threading.CancellationToken cancellationToken) => TaskWaitAny(tasks, -1, cancellationToken);
+    public static int TaskWaitAny(global::System.Threading.Tasks.Task[] tasks, int millisecondsTimeout, global::System.Threading.CancellationToken cancellationToken)
+    {
+        var index = -1;
+        Sliced(millisecondsTimeout, ms => (index = global::System.Threading.Tasks.Task.WaitAny(tasks, ms, cancellationToken)) >= 0);
+        return index;
+    }
+
+    /// <summary>The task once it has completed (<c>.Result</c>, <c>.GetAwaiter().GetResult()</c> then return at once).</summary>
+    public static T Ready<T>(T task) where T : global::System.Threading.Tasks.Task
+    {
+        if (task != null)
+            Sliced(-1, ms =>
+            {
+                try { return task.Wait(ms); }
+                catch (global::System.AggregateException) { return true; } // faulted or canceled: the caller's own call throws
+            });
+        return task;
+    }
+
+    public static void SemaphoreWait(global::System.Threading.SemaphoreSlim semaphore) => Sliced(-1, ms => semaphore.Wait(ms));
+    public static bool SemaphoreWait(global::System.Threading.SemaphoreSlim semaphore, int millisecondsTimeout) => Sliced(millisecondsTimeout, ms => semaphore.Wait(ms));
+    public static bool SemaphoreWait(global::System.Threading.SemaphoreSlim semaphore, global::System.TimeSpan timeout) => Sliced(Ms(timeout), ms => semaphore.Wait(ms));
+    public static void SemaphoreWait(global::System.Threading.SemaphoreSlim semaphore, global::System.Threading.CancellationToken cancellationToken) => Sliced(-1, ms => semaphore.Wait(ms, cancellationToken));
+    public static bool SemaphoreWait(global::System.Threading.SemaphoreSlim semaphore, int millisecondsTimeout, global::System.Threading.CancellationToken cancellationToken) => Sliced(millisecondsTimeout, ms => semaphore.Wait(ms, cancellationToken));
+    public static bool SemaphoreWait(global::System.Threading.SemaphoreSlim semaphore, global::System.TimeSpan timeout, global::System.Threading.CancellationToken cancellationToken) => Sliced(Ms(timeout), ms => semaphore.Wait(ms, cancellationToken));
+
+    public static void EventWait(global::System.Threading.ManualResetEventSlim waitable) => Sliced(-1, ms => waitable.Wait(ms));
+    public static bool EventWait(global::System.Threading.ManualResetEventSlim waitable, int millisecondsTimeout) => Sliced(millisecondsTimeout, ms => waitable.Wait(ms));
+    public static bool EventWait(global::System.Threading.ManualResetEventSlim waitable, global::System.TimeSpan timeout) => Sliced(Ms(timeout), ms => waitable.Wait(ms));
+    public static void EventWait(global::System.Threading.ManualResetEventSlim waitable, global::System.Threading.CancellationToken cancellationToken) => Sliced(-1, ms => waitable.Wait(ms, cancellationToken));
+    public static bool EventWait(global::System.Threading.ManualResetEventSlim waitable, int millisecondsTimeout, global::System.Threading.CancellationToken cancellationToken) => Sliced(millisecondsTimeout, ms => waitable.Wait(ms, cancellationToken));
+    public static bool EventWait(global::System.Threading.ManualResetEventSlim waitable, global::System.TimeSpan timeout, global::System.Threading.CancellationToken cancellationToken) => Sliced(Ms(timeout), ms => waitable.Wait(ms, cancellationToken));
+
+    public static void CountdownWait(global::System.Threading.CountdownEvent waitable) => Sliced(-1, ms => waitable.Wait(ms));
+    public static bool CountdownWait(global::System.Threading.CountdownEvent waitable, int millisecondsTimeout) => Sliced(millisecondsTimeout, ms => waitable.Wait(ms));
+    public static bool CountdownWait(global::System.Threading.CountdownEvent waitable, global::System.TimeSpan timeout) => Sliced(Ms(timeout), ms => waitable.Wait(ms));
+    public static void CountdownWait(global::System.Threading.CountdownEvent waitable, global::System.Threading.CancellationToken cancellationToken) => Sliced(-1, ms => waitable.Wait(ms, cancellationToken));
+    public static bool CountdownWait(global::System.Threading.CountdownEvent waitable, int millisecondsTimeout, global::System.Threading.CancellationToken cancellationToken) => Sliced(millisecondsTimeout, ms => waitable.Wait(ms, cancellationToken));
+    public static bool CountdownWait(global::System.Threading.CountdownEvent waitable, global::System.TimeSpan timeout, global::System.Threading.CancellationToken cancellationToken) => Sliced(Ms(timeout), ms => waitable.Wait(ms, cancellationToken));
+
+    // Waiting again after a slice misses no Pulse: the lock is held again between two slices.
+    public static bool MonitorWait(object obj) => Sliced(-1, ms => global::System.Threading.Monitor.Wait(obj, ms));
+    public static bool MonitorWait(object obj, int millisecondsTimeout) => Sliced(millisecondsTimeout, ms => global::System.Threading.Monitor.Wait(obj, ms));
+    public static bool MonitorWait(object obj, global::System.TimeSpan timeout) => Sliced(Ms(timeout), ms => global::System.Threading.Monitor.Wait(obj, ms));
+
+    public static bool WaitOne(global::System.Threading.WaitHandle handle) => Sliced(-1, ms => handle.WaitOne(ms));
+    public static bool WaitOne(global::System.Threading.WaitHandle handle, int millisecondsTimeout) => Sliced(millisecondsTimeout, ms => handle.WaitOne(ms));
+    public static bool WaitOne(global::System.Threading.WaitHandle handle, global::System.TimeSpan timeout) => Sliced(Ms(timeout), ms => handle.WaitOne(ms));
+
+    public static bool WaitAll(global::System.Threading.WaitHandle[] waitHandles) => Sliced(-1, ms => global::System.Threading.WaitHandle.WaitAll(waitHandles, ms));
+    public static bool WaitAll(global::System.Threading.WaitHandle[] waitHandles, int millisecondsTimeout) => Sliced(millisecondsTimeout, ms => global::System.Threading.WaitHandle.WaitAll(waitHandles, ms));
+    public static bool WaitAll(global::System.Threading.WaitHandle[] waitHandles, global::System.TimeSpan timeout) => Sliced(Ms(timeout), ms => global::System.Threading.WaitHandle.WaitAll(waitHandles, ms));
+
+    public static int WaitAny(global::System.Threading.WaitHandle[] waitHandles) => WaitAny(waitHandles, -1);
+    public static int WaitAny(global::System.Threading.WaitHandle[] waitHandles, global::System.TimeSpan timeout) => WaitAny(waitHandles, Ms(timeout));
+    public static int WaitAny(global::System.Threading.WaitHandle[] waitHandles, int millisecondsTimeout)
+    {
+        var index = global::System.Threading.WaitHandle.WaitTimeout;
+        Sliced(millisecondsTimeout, ms => (index = global::System.Threading.WaitHandle.WaitAny(waitHandles, ms)) != global::System.Threading.WaitHandle.WaitTimeout);
+        return index;
+    }
 
     public static unsafe void Call()
     {

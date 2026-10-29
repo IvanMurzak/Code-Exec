@@ -537,6 +537,113 @@ class SnippetThreadTests(unittest.TestCase):
         self.assertEqual([], result["logs"])
 
 
+_CHILD = """import json, sys, threading, time
+sys.path.insert(0, %r)
+import code_exec
+started = time.monotonic()
+result = code_exec.run(%r, timeout_ms=%d)
+elapsed = time.monotonic() - started
+after = code_exec.run("import threading, time\\ntime.sleep(0.2)\\nthreading.Event().wait(0.1)\\n1 + 1", timeout_ms=5000)
+print(json.dumps({"result": result, "elapsed": elapsed, "after": after}))
+sys.stdout.flush()
+"""
+
+
+@unittest.skipIf(runner._SET_ASYNC_EXC is None, "needs ctypes")
+class BlockingWaitTests(unittest.TestCase):
+    """Spec section 4: a snippet blocked in a wait that never ends (a join on a thread that never ends, Future.result,
+    Event.wait, queue.get, time.sleep) still stops with Timeout at its budget. Each case runs in a child process: before
+    the fix it hung the interpreter for good."""
+
+    SPIN = "import threading\ndef spin():\n    while True:\n        pass\n"
+
+    def run_child(self, code, timeout_ms=1000):
+        script = _CHILD % (os.path.join(ROOT, "python"), code, timeout_ms)
+        try:
+            # A daemon-less thread the snippet leaves blocked keeps a child from exiting: the output is read first.
+            child = subprocess.run([sys.executable, "-B", "-c", script], capture_output=True, text=True, timeout=60)
+        except subprocess.TimeoutExpired as error:
+            self.fail("the snippet hung the interpreter: %r" % (error.stdout,))
+        self.assertEqual(0, child.returncode, child.stderr[-2000:])
+        report = json.loads(child.stdout)
+        self.assertTrue(report["after"]["success"], report["after"])  # the interpreter is usable afterwards
+        self.assertEqual("2", report["after"]["value"])
+        return report["result"], report["elapsed"]
+
+    def assert_times_out(self, code, timeout_ms=1000):
+        result, elapsed = self.run_child(code, timeout_ms)
+        self.assertEqual("Timeout", result["errorKind"], result)
+        self.assertTrue(result["error"].startswith(
+            "SnippetTimeout: The snippet ran longer than its time budget of %d ms (timeoutMs)" % timeout_ms), result["error"])
+        self.assertIn('snippet.py", line', result["error"])
+        self.assertLess(elapsed, timeout_ms / 1000.0 + 1.5)
+        return result
+
+    def test_join_on_a_thread_that_never_ends(self):
+        self.assert_times_out(self.SPIN + "t = threading.Thread(target=spin)\nt.start()\nt.join()")
+
+    def test_future_result_of_work_that_never_ends(self):
+        self.assert_times_out("from concurrent.futures import ThreadPoolExecutor\n"
+                              "ThreadPoolExecutor(2).submit(lambda: [0 for _ in iter(int, 1)]).result()")
+
+    def test_pool_shutdown_waiting_for_work_that_never_ends(self):
+        self.assert_times_out("from concurrent.futures import ThreadPoolExecutor\nwith ThreadPoolExecutor(2) as pool:\n"
+                              "    pool.submit(lambda: [0 for _ in iter(int, 1)])")
+
+    def test_waits_nothing_ever_ends(self):
+        codes = ["import threading\nthreading.Event().wait()",
+                 "import queue\nqueue.Queue().get()",
+                 "import threading\nthreading.Semaphore(0).acquire()",
+                 "import threading\nc = threading.Condition()\nwith c:\n    c.wait()",
+                 "import threading\nthreading.Event().wait(60)",
+                 "import time\ntime.sleep(60)"]
+        for code in codes:
+            with self.subTest(code):
+                self.assert_times_out(code)
+
+    def test_join_on_a_thread_blocked_in_a_wait(self):
+        result = self.assert_times_out("import threading\ne = threading.Event()\ndef f():\n    e.wait()\n"
+                                       "t = threading.Thread(target=f, daemon=True)\nt.start()\nt.join()")
+        self.assertEqual([], result["logs"])  # stopped in its wait at the deadline, gone by the end
+
+    def test_result_of_work_blocked_in_a_wait(self):
+        self.assert_times_out("import threading\nfrom concurrent.futures import ThreadPoolExecutor\n"
+                              "e = threading.Event()\nThreadPoolExecutor(1).submit(lambda: e.wait()).result()")
+
+    def test_waits_that_end_keep_their_results(self):
+        code = ("import threading, time, queue\ne = threading.Event()\nq = queue.Queue()\n"
+                "def later():\n    time.sleep(0.3)\n    q.put(5)\n    e.set()\n"
+                "t = threading.Thread(target=later)\nt.start()\nstarted = time.monotonic()\n"
+                "got = (e.wait(), q.get(), threading.Event().wait(0.2), t.join(), threading.Condition().acquire())\n"
+                "time.sleep(0.25)\n(got, round(time.monotonic() - started, 1))")
+        result, _ = self.run_child(code, timeout_ms=5000)
+        self.assertTrue(result["success"], result)
+        self.assertEqual("[[true, 5, false, null, true], 0.8]", result["value"])
+
+    def test_stand_ins_are_restored_after_the_run(self):
+        originals = (threading.Thread.start, threading.Thread.join, threading.Condition.wait, time.sleep)
+        result = code_exec.run("import threading, time\n(time.sleep is threading.Thread.join) or 1", timeout_ms=5000)
+        self.assertTrue(result["success"], result)
+        self.assertEqual(originals, (threading.Thread.start, threading.Thread.join, threading.Condition.wait, time.sleep))
+        self.assertEqual({}, runner._thread_run)
+
+    def test_host_threads_wait_as_python_does(self):
+        # A host thread waiting while a snippet runs is the host's own: its wait is not sliced, nor stopped.
+        done = threading.Event()
+        waited = []
+
+        def host():
+            waited.append(threading.Event().wait(0.5))
+            done.set()
+
+        thread = threading.Thread(target=host)
+        thread.start()
+        result = code_exec.run("import threading\nthreading.Event().wait()", timeout_ms=200)
+        self.assertEqual("Timeout", result["errorKind"], result)
+        thread.join()
+        self.assertEqual([False], waited)
+
+
 CAPPED = runner._CAPPED  # Python 3.12+ raise RecursionError before the C stack runs out: no cap there
 
 

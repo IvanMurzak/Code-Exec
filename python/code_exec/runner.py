@@ -40,6 +40,7 @@ _default_timeout_ms = TIMEOUT_MS
 _max_timeout_ms = 0  # the highest budget a request may ask for (set_max_timeout_ms); 0 = no cap
 _REFIRE_SECONDS = 0.1  # a snippet that catches the stop is stopped again this often
 _POLL_SECONDS = 0.02  # how often the watchdog looks whether the snippet ended
+_SLICE_SECONDS = 0.05  # a blocking wait of the snippet's threads (join, Event.wait, time.sleep, ...) looks at the budget this often
 _MARGIN_SECONDS = 0.05  # a snippet ending this long before its deadline was never stopped: no need to wait for the watchdog
 
 # Python < 3.12 has no C stack check: a snippet that raises the recursion limit and then recurses in C (repr / json.dumps
@@ -50,6 +51,8 @@ MAX_RECURSION_LIMIT = 3000
 _CAPPED = sys.version_info < (3, 12)
 _max_recursion_limit = MAX_RECURSION_LIMIT
 _SET_RECURSION_LIMIT = sys.setrecursionlimit  # bound once: the runner restores limits with it, whatever a snippet replaced
+# Bound once: the runner's own threads sleep and look at the clock with these, whatever a snippet (or the runner) replaced.
+_sleep, _monotonic, _is_alive = time.sleep, time.monotonic, threading.Thread.is_alive
 
 # JSON request field -> run() keyword argument (integers).
 _INT_FIELDS = {
@@ -186,9 +189,9 @@ def _execute(result, logs, code, include, include_root, imports, include_outside
     out, err = _LogStream(logs, "info"), _LogStream(logs, "error")
     prefixes = [_prefix(folder) for folder in folders]
     saved = _HostState(code, sources)
-    watchdog = _Watchdog(timeout_ms)
     agent_files = {SNIPPET_FILE} | {path for path, _ in files}
     threads = _SnippetThreads(lambda filename: filename in agent_files or _under(filename, prefixes))
+    watchdog = _Watchdog(timeout_ms, threads)
     try:
         sys.path[:0] = folders
         if folders:
@@ -214,6 +217,9 @@ def _execute(result, logs, code, include, include_root, imports, include_outside
     except BaseException as error:  # SystemExit, KeyboardInterrupt, ...: a snippet must never take the host down
         _make_room(saved)
         watchdog.stop()
+        if isinstance(error, SnippetThreadStopped) and threads.stop_type is not None and threads.stopping:
+            # A thread stopped at the deadline handed its stop on (Future.result): the run ran out of time.
+            error = threads.stop_type().with_traceback(error.__traceback__)
         result["errorKind"] = "Timeout" if isinstance(error, SnippetTimeout) else "Runtime"
         try:
             result["error"] = _format_error(error, root, prefixes, {path for path, _ in files})
@@ -272,14 +278,18 @@ class SnippetTimeout(BaseException):
 class _Watchdog:
     """Stops a snippet that outruns its time budget: a timer thread raises :class:`SnippetTimeout` in the snippet's thread
     (``PyThreadState_SetAsyncExc``), again every ``_REFIRE_SECONDS`` while the snippet catches it. Python delivers it
-    between bytecodes, so pure Python loops stop; a call into C (``time.sleep``, an engine call) finishes first.
+    between bytecodes, so pure Python loops stop; a call into C (an engine call) finishes first. At the deadline the
+    threads the snippet started are stopped too (:meth:`_SnippetThreads.deadline_passed`): a snippet waiting for one of
+    them (``join``, ``Future.result``) gets it back. A snippet's thread inside a sliced wait (:func:`_sliced`) gets no
+    asynchronous stop: the wait raises it itself between two slices, where the lock it waits with is held again.
 
     No lock is ever taken in the snippet's thread (a stop delivered right after acquiring one would leave it held):
     :meth:`stop` clears a flag, waits for the timer thread to end if it may have raised, then drops a stop raised but not
     delivered yet. None reaches the host after the run."""
 
-    def __init__(self, timeout_ms):
+    def __init__(self, timeout_ms, threads):
         self._timeout_ms = timeout_ms
+        self._threads = threads
         self._thread_id = None
         self._deadline = 0.0
         self._armed = self._fired = self._exited = False
@@ -289,7 +299,8 @@ class _Watchdog:
             return
         stop = type("SnippetTimeout", (SnippetTimeout,), {"budget_ms": self._timeout_ms})
         self._thread_id = threading.get_ident()
-        self._deadline = time.monotonic() + self._timeout_ms / 1000.0
+        self._deadline = _monotonic() + self._timeout_ms / 1000.0
+        self._threads.arm(self._deadline, stop)
         self._armed = True
         _start_untracked(threading.Thread(target=self._watch, args=(stop,), name="code_exec watchdog", daemon=True))
 
@@ -297,12 +308,15 @@ class _Watchdog:
         try:
             deadline = self._deadline
             while self._armed:
-                now = time.monotonic()
+                now = _monotonic()
                 if now < deadline:
-                    time.sleep(min(_POLL_SECONDS, deadline - now))
+                    _sleep(min(_POLL_SECONDS, deadline - now))
                 elif self._armed:
-                    self._fired = True
-                    _async_exc(self._thread_id, stop)
+                    first, self._fired = not self._fired, True
+                    if not self._threads.main_waiting:
+                        _async_exc(self._thread_id, stop)
+                    if first:
+                        self._threads.deadline_passed()
                     deadline = now + _REFIRE_SECONDS
         finally:
             self._exited = True
@@ -313,9 +327,9 @@ class _Watchdog:
                 self._armed = False
                 # Before the deadline (and never fired) the timer cannot raise any more: it looks at the flag before it
                 # would. Otherwise wait until it is gone, then drop what it may have raised.
-                if self._fired or time.monotonic() >= self._deadline - _MARGIN_SECONDS:
+                if self._fired or _monotonic() >= self._deadline - _MARGIN_SECONDS:
                     while not self._exited:
-                        time.sleep(0.001)
+                        _sleep(0.001)
                     _async_exc(self._thread_id, None)
                 self._thread_id = None
             except SnippetTimeout:  # delivered while disarming: disarm again
@@ -323,31 +337,131 @@ class _Watchdog:
 
 
 class SnippetThreadStopped(BaseException):
-    """Raised in a thread the snippet started, once the snippet has ended (spec section 4): threads may not outlive it."""
+    """Raised in a thread the snippet started once the snippet has ended or ran out of its time budget (spec section 4):
+    threads may not outlive it."""
 
     def __str__(self):
-        return "The snippet has ended, so this thread it started was stopped: join threads before the snippet returns."
+        return ("The snippet has ended (or ran out of its time budget), so this thread it started was stopped: join "
+                "threads before the snippet returns.")
 
 
-# Runs whose snippet is running, and the threading.Thread.start the dispatcher stands in for while there is one. A host
-# that replaced threading.Thread.start meanwhile keeps the dispatcher in its chain: it is then never installed again.
+# Runs whose snippet is running. While there is one, the runner stands in for threading.Thread.start (tracking) and for
+# the blocking waits (sliced): each entry is (owner, attribute, stand-in). A host that replaced one of them meanwhile
+# keeps the stand-in in its chain: that one is then never installed again (_kept), its original stays in _originals.
 _thread_runs = []
-_saved_start = None
-_dispatcher_kept = False
+_originals = {}
+_kept = set()
+_thread_run = {}  # thread ident -> the innermost run it belongs to (its snippet's thread, or a thread the run started)
+
+
+def _original(name):
+    """What the stand-in ``name`` stands in for (the attribute itself while it is not installed)."""
+    original = _originals.get(name)
+    if original is None:
+        owner, attribute, _ = _PATCHES[name]
+        original = getattr(owner, attribute)
+    return original
+
+
+def _install():
+    for name, (owner, attribute, stand_in) in _PATCHES.items():
+        if name not in _kept:
+            _originals[name] = getattr(owner, attribute)
+            setattr(owner, attribute, stand_in)
+
+
+def _uninstall():
+    for name, (owner, attribute, stand_in) in _PATCHES.items():
+        if name in _kept:
+            continue
+        if getattr(owner, attribute) is stand_in:
+            setattr(owner, attribute, _originals.pop(name))
+        else:
+            _kept.add(name)
 
 
 def _dispatch_start(thread, *args, **kwargs):
     """``threading.Thread.start`` while snippets run: a thread started from a snippet's thread (or one of its threads) is
     that run's."""
-    for runs in list(_thread_runs):
-        if threading.get_ident() in runs.owners:
-            return runs.start_tracked(thread, args, kwargs)
-    return _saved_start(thread, *args, **kwargs)
+    run = _thread_run.get(threading.get_ident())
+    if run is not None and run.active:
+        return run.start_tracked(thread, args, kwargs)
+    return _original("start")(thread, *args, **kwargs)
 
 
 def _start_untracked(thread):
     """Starts one of the runner's own threads: never a snippet's."""
-    (_saved_start if _dispatcher_kept or threading.Thread.start is _dispatch_start else threading.Thread.start)(thread)
+    _original("start")(thread)
+
+
+def _long(timeout):
+    """Whether a wait of ``timeout`` seconds (None = no bound) is long enough to slice. Anything else (a short or
+    negative one, NaN, infinity, a type Python's own rejects) goes to Python's own wait unchanged."""
+    if timeout is None:
+        return True
+    return isinstance(timeout, (int, float)) and _SLICE_SECONDS < timeout < 1e9
+
+
+def _sliced(timeout, wait):
+    """A blocking wait of a snippet's thread (``wait(seconds)`` returns whether it is over), in slices of at most
+    ``_SLICE_SECONDS``: between two slices the thread is stopped when its run is (:meth:`_SnippetThreads.check`), so a
+    wait that never ends cannot outlast the time budget. Returns what the last slice returned, or ``None`` when the
+    thread belongs to no run (the caller then waits as Python does)."""
+    ident = threading.get_ident()
+    run = _thread_run.get(ident)
+    if run is None:
+        return None
+    end = None if timeout is None else _monotonic() + timeout
+    while True:
+        left = _SLICE_SECONDS if end is None else max(0.0, min(_SLICE_SECONDS, end - _monotonic()))
+        if run.ended and not run.stops(ident):
+            # Its run is over and nothing of the agent's is left on its stack: wait the rest as Python does.
+            return wait(None if end is None else max(0.0, end - _monotonic()))
+        done = run.wait_slice(ident, wait, left)
+        if done or (end is not None and _monotonic() >= end):
+            return done
+
+
+def _sliced_sleep(seconds):
+    """``time.sleep`` while snippets run (spec section 4)."""
+    if not (_thread_run and _long(seconds) and seconds is not None):
+        return _original("sleep")(seconds)
+    sleep = _original("sleep")
+    if _sliced(seconds, lambda left: sleep(left) or False) is None:
+        sleep(seconds)
+
+
+def _sliced_join(thread, timeout=None):
+    """``threading.Thread.join`` while snippets run (spec section 4)."""
+    join = _original("join")
+    if not (_thread_run and _long(timeout)):
+        return join(thread, timeout)
+
+    def once(left):
+        join(thread, left)  # raises as Python's own does: not started, the current thread
+        return not _is_alive(thread)
+
+    if _sliced(timeout, once) is None:
+        join(thread, timeout)
+
+
+def _sliced_wait(condition, timeout=None):
+    """``threading.Condition.wait`` while snippets run (spec section 4): ``Event.wait``, ``Semaphore.acquire``,
+    ``queue.Queue.get``, ``concurrent.futures.Future.result`` and ``Barrier.wait`` wait through it. Waiting again after
+    a slice misses no ``notify``: the condition's lock is held between two slices."""
+    wait = _original("wait")
+    if not (_thread_run and _long(timeout)):
+        return wait(condition, timeout)
+    done = _sliced(timeout, lambda left: wait(condition, left))
+    return wait(condition, timeout) if done is None else done
+
+
+_PATCHES = {
+    "start": (threading.Thread, "start", _dispatch_start),
+    "join": (threading.Thread, "join", _sliced_join),
+    "wait": (threading.Condition, "wait", _sliced_wait),
+    "sleep": (time, "sleep", _sliced_sleep),
+}
 
 
 class _Tracked:
@@ -359,38 +473,100 @@ class _Tracked:
 
 
 class _SnippetThreads:
-    """The threads a snippet starts: ``threading.Thread.start`` called from the snippet's thread, or from one of those
-    threads, while the snippet runs. When it ends, a ``threading.Timer`` not fired yet is cancelled and every other one
-    still alive gets :class:`SnippetThreadStopped` (``PyThreadState_SetAsyncExc``) whenever the agent's own code
-    (``is_agent_file``) is the frame it runs, again every ``_REFIRE_SECONDS`` while that code is on its stack. A thread with
-    none of it on its stack (a pool worker waiting for work) is left alone from then on. The thread swallows the stop:
-    nothing is printed."""
+    """One run's threads: ``threading.Thread.start`` called from the snippet's thread, or from one of those threads,
+    while the snippet runs. At the deadline and when it ends, a ``threading.Timer`` not fired yet is cancelled (at the
+    end) and every other one still alive gets :class:`SnippetThreadStopped` (``PyThreadState_SetAsyncExc``) whenever the
+    agent's own code (``is_agent_file``) is the frame it runs, again every ``_REFIRE_SECONDS`` while that code is on its
+    stack; one inside a sliced wait raises it there itself. A thread with none of it on its stack (a pool worker waiting
+    for work) is left alone once the run has ended. The thread swallows the stop: nothing is printed."""
 
     def __init__(self, is_agent_file):
         self._is_agent_file = is_agent_file
         self._tracked = {}  # id(thread) -> _Tracked; only ever added to, so the stopper thread can read it any time
-        self.owners = set()
-        self._active = False
+        self._previous = {}  # thread ident -> the run it belonged to before this one (nested runs)
+        self._stopper = None
+        self.main_ident = None
+        self.active = self.ended = self.stopping = False
+        self.main_waiting = False  # the snippet's thread is inside a sliced wait: it raises the timeout itself
+        self.deadline, self.stop_type = 0.0, None
 
     def start(self):
-        global _saved_start
         if _SET_ASYNC_EXC is None:
             return
-        self.owners.add(threading.get_ident())
-        if not _thread_runs and not _dispatcher_kept:
-            _saved_start, threading.Thread.start = threading.Thread.start, _dispatch_start
+        if not _thread_runs:
+            _install()
         _thread_runs.append(self)
-        self._active = True
+        self.main_ident = threading.get_ident()
+        self._enter(self.main_ident)
+        self.active = True
+
+    def arm(self, deadline, stop_type):
+        self.deadline, self.stop_type = deadline, stop_type
+
+    def _enter(self, ident):
+        self._previous[ident] = _thread_run.get(ident)
+        _thread_run[ident] = self
+
+    def _leave(self, ident):
+        previous = self._previous.pop(ident, None)
+        if _thread_run.get(ident) is self:
+            if previous is None:
+                _thread_run.pop(ident, None)
+            else:
+                _thread_run[ident] = previous
+
+    def _chain(self, ident):
+        """This run and the runs ``ident`` belonged to before it (nested runs), innermost first."""
+        run = self
+        while run is not None:
+            yield run
+            run = run._previous.get(ident)
+
+    def wait_slice(self, ident, wait, seconds):
+        """One slice of a sliced wait of thread ``ident``, then the stop it is due, if any."""
+        mains = [run for run in self._chain(ident) if run.main_ident == ident]
+        for run in mains:
+            run.main_waiting = True
+        try:
+            done = wait(seconds)
+        finally:
+            for run in mains:
+                run.main_waiting = False
+        for run in self._chain(ident):  # also when the wait is over: what it waited for may have been stopped
+            run.check(ident)
+        return done
+
+    def check(self, ident):
+        """Raises the stop thread ``ident`` is due between two slices of a wait: the run's timeout in its snippet's thread
+        once the deadline has passed, :class:`SnippetThreadStopped` in a thread it started once it is stopping."""
+        if ident == self.main_ident:
+            if self.stop_type is not None and _monotonic() >= self.deadline:
+                raise self.stop_type()
+        elif self.stops(ident):
+            raise SnippetThreadStopped()
+
+    def stops(self, ident):
+        """Whether thread ``ident`` (one the run started) is to stop: the run is stopping and the agent's code is on the
+        calling thread's stack."""
+        if not self.stopping or ident == self.main_ident:
+            return False
+        frame = sys._getframe(1)
+        while frame is not None:
+            if self._is_agent_file(frame.f_code.co_filename):
+                return True
+            frame = frame.f_back
+        return False
 
     def start_tracked(self, thread, args, kwargs):
+        start = _original("start")
         if id(thread) in self._tracked:  # started twice: the second start raises as Python's own does
-            return _saved_start(thread, *args, **kwargs)
+            return start(thread, *args, **kwargs)
         entry = self._tracked[id(thread)] = _Tracked(thread)
-        run, owners = thread.run, self.owners
+        run = thread.run
 
         def tracked():
             ident = threading.get_ident()
-            owners.add(ident)
+            self._enter(ident)
             try:
                 try:
                     run()
@@ -398,7 +574,7 @@ class _SnippetThreads:
                     while True:  # a stop raised while leaving must not outlive the thread either
                         try:
                             entry.done = True
-                            owners.discard(ident)
+                            self._leave(ident)
                             _async_exc(ident, None)
                             break
                         except SnippetThreadStopped:
@@ -409,24 +585,31 @@ class _SnippetThreads:
         thread.run = tracked
         entry.starting = True
         try:
-            return _saved_start(thread, *args, **kwargs)
+            return start(thread, *args, **kwargs)
         finally:
             entry.starting = False
 
+    def deadline_passed(self):
+        """The watchdog's thread, at the deadline: the threads the snippet started stop now, not only once it has ended
+        (the snippet may be waiting for one of them). Never raises."""
+        try:
+            self.stopping = True
+            if self._stop_running():
+                self._watch_on()
+        except BaseException:
+            pass
+
     def stop(self, logs):
         """Never raises: the host's state is restored after it, whatever the snippet's threads do."""
-        global _dispatcher_kept
-        if not self._active:
+        if not self.active:
             return
-        self._active = False
+        self.active = False
         try:
+            self.ended = self.stopping = True
             _thread_runs.remove(self)
-            if not _thread_runs and not _dispatcher_kept:
-                if threading.Thread.start is _dispatch_start:
-                    threading.Thread.start = _saved_start
-                else:
-                    _dispatcher_kept = True
-            self.owners.discard(threading.get_ident())
+            if not _thread_runs:
+                _uninstall()
+            self._leave(self.main_ident)
             entries = list(self._tracked.values())
             for entry in entries:
                 timer = entry.thread
@@ -434,14 +617,20 @@ class _SnippetThreads:
                     threading.Timer.cancel(timer)
                     entry.cancelled = True
             alive = [entry for entry in entries
-                     if not entry.cancelled and (entry.starting or threading.Thread.is_alive(entry.thread))]
+                     if not entry.cancelled and (entry.starting or _is_alive(entry.thread))]
             if alive:
                 logs.add("warning", "%d thread(s) the snippet started were still running when it ended: each is stopped "
                                     "while it runs the snippet's code. Join threads before the snippet returns." % len(alive))
             if self._stop_running():
-                _start_untracked(threading.Thread(target=self._watch, name="code_exec thread stopper", daemon=True))
+                self._watch_on()
         except BaseException:  # a snippet's Thread subclass that raises: the rest of the run still ends cleanly
             pass
+
+    def _watch_on(self):
+        """Starts the stopper thread (once): it raises the stop again every ``_REFIRE_SECONDS``."""
+        if self._stopper is None:
+            self._stopper = threading.Thread(target=self._watch, name="code_exec thread stopper", daemon=True)
+            _start_untracked(self._stopper)
 
     def _stop_running(self):
         """Raises the stop in the tracked threads running the agent's code; returns whether any is still to watch."""
@@ -457,8 +646,11 @@ class _SnippetThreads:
             top = frame = frames.get(thread.ident)
             while frame is not None and not self._is_agent_file(frame.f_code.co_filename):
                 frame = frame.f_back
-            if frame is None or not threading.Thread.is_alive(thread):
-                entry.dismissed = True  # ended, never started, or none of the agent's code left on its stack
+            if frame is None or not _is_alive(thread):
+                if self.ended:  # ended, never started, or none of the agent's code left on its stack
+                    entry.dismissed = True
+                else:
+                    watching = True  # between two tasks, or not running the agent's code yet: look again
                 continue
             watching = True
             if self._is_agent_file(top.f_code.co_filename) and not entry.done:
@@ -468,8 +660,8 @@ class _SnippetThreads:
     def _watch(self):
         try:
             while True:
-                time.sleep(_REFIRE_SECONDS)
-                if not self._stop_running():
+                _sleep(_REFIRE_SECONDS)
+                if not self._stop_running() and self.ended:
                     break
         except BaseException:  # interpreter shutdown
             pass
