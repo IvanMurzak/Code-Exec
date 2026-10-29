@@ -282,7 +282,73 @@ namespace CodeExecTests
             Assert.DoesNotContain(result.Diagnostics, d => d.Id == "CS0439");
         }
 
+        // A using declaration or statement is a statement wherever it stands, also first: only `using X;`, `using static`,
+        // `using A = B;` and `global using` are directives (spec §3.1).
+        [Theory]
+        [InlineData("using var w = new System.IO.StringWriter();\nw.Write(1);\nw.ToString()", "1")]
+        [InlineData("using System.IO.StringWriter w = new System.IO.StringWriter();\nw.Write(2);\nw.ToString()", "2")]
+        [InlineData("using var a = new System.IO.StringWriter(); using var b = new System.IO.StringWriter();\na.Write(3);\na.ToString() + b", "3")]
+        [InlineData("var x = 4;\nusing var w = new System.IO.StringWriter();\nw.Write(x);\nw.ToString()", "4")]
+        [InlineData("using System.IO;\nusing var w = new StringWriter();\nw.Write(5);\nw.ToString()", "5")]
+        [InlineData("using\n  var w = new System.IO.StringWriter();\nw.Write(6);\nw.ToString()", "6")]
+        [InlineData("using System.IO.StringWriter a = new System.IO.StringWriter(), b = new System.IO.StringWriter();\nb.Write(7);\nb.ToString()", "7")]
+        [InlineData("using (var w = new System.IO.StringWriter()) { w.Write(8); return w.ToString(); }", "8")]
+        [InlineData("using (new System.IO.StringWriter()) { }\n9", "9")]
+        [InlineData("using static System.Math;\nusing V = System.Version;\nusing var w = new System.IO.StringWriter();\nMax(new V(1, 10).Minor, 2)", "10")]
+        [InlineData("using var w = new System.IO.StringWriter();\nint F() { using var inner = new System.IO.StringWriter(); return 11; }\nF()", "11")]
+        // Disposed when the snippet ends, after the result is taken (the returned object is converted afterwards).
+        [InlineData("class D : IDisposable { readonly System.Text.StringBuilder _log; public D(System.Text.StringBuilder log) => _log = log; public void Dispose() => _log.Append(\"disposed\"); }\nvar log = new System.Text.StringBuilder();\nusing var d = new D(log);\nlog.Append(\"body;\");\nlog", "body;disposed")]
+        public void UsingDeclarationsAndStatementsStayStatements(string code, string expected)
+        {
+            var result = Fixtures.Runner().Execute(new ExecuteRequest { Code = code });
+            Assert.True(result.Success, result.Error + " " + string.Join(" | ", result.Diagnostics));
+            Assert.Equal(expected, result.Value);
+        }
+
+        [Theory]
+        [InlineData("using var w = new System.IO.StringWriter(); var z = undefinedThing;", 1, 53)]
+        [InlineData("using var w = undefinedThing;", 1, 15)]
+        [InlineData("var a = 1;\n  using var w = new System.IO.StringWriter();\nvar z = undefinedThing;", 3, 9)]
+        public void UsingDeclarationsKeepTheAgentsCoordinates(string code, int line, int column)
+        {
+            var result = Fixtures.Runner().Execute(new ExecuteRequest { Code = code, AutoImport = false });
+            Assert.Equal(ErrorKind.Compile, result.ErrorKind);
+            var d = Assert.Single(result.Diagnostics);
+            Assert.Equal(("CS0103", "snippet.cs", line, column), (d.Id, d.File, d.Line, d.Column));
+        }
+
+        // Invalid code keeps its own errors: no `using` is dropped, a directive missing its `;` stays a directive.
+        [Theory]
+        [InlineData("using readonly System.IO.StringWriter w = new System.IO.StringWriter();\n1", "CS1041", 1, 6)]
+        [InlineData("using System\nvar x = 1;\nx", "CS1002", 1, 13)]
+        public void InvalidUsingsKeepTheirOwnErrors(string code, string id, int line, int column)
+        {
+            var result = Fixtures.Runner().Execute(new ExecuteRequest { Code = code, AutoImport = false });
+            Assert.Equal(ErrorKind.Compile, result.ErrorKind);
+            Assert.Contains(result.Diagnostics, d => d.Id == id && d.Line == line && d.Column == column);
+        }
+
+        [Fact]
+        public void GlobalUsingGoesBeforeTheRuntimesUsings()
+        {
+            if (typeof(Microsoft.CodeAnalysis.CSharp.CSharpCompilation).Assembly.GetName().Version!.Major < 4)
+                return; // C# 10
+            var result = Fixtures.Runner().Execute(new ExecuteRequest { Code = "global using System.Text;\nusing var w = new System.IO.StringWriter();\nnew StringBuilder(\"g\").ToString()" });
+            Assert.True(result.Success, result.Error + " " + string.Join(" | ", result.Diagnostics));
+            Assert.Equal("g", result.Value);
+        }
+
 #if NET8_0_OR_GREATER
+        [Theory]
+        [InlineData("await using var m = new System.IO.MemoryStream();\nm.Length", "0")]
+        [InlineData("await using System.IO.MemoryStream m = new System.IO.MemoryStream(new byte[3]);\nm.Length", "3")]
+        public async Task AwaitUsingDeclarationMakesTheSnippetAsync(string code, string expected)
+        {
+            var result = await Fixtures.Runner().ExecuteAsync(new ExecuteRequest { Code = code });
+            Assert.True(result.Success, result.Error + " " + string.Join(" | ", result.Diagnostics));
+            Assert.Equal(expected, result.Value);
+        }
+
         [Theory]
         [InlineData("static async IAsyncEnumerable<int> G() { await Task.Yield(); yield return 2; }\nint s = 0;\nawait foreach (var x in G()) s += x;\ns", "2")]
         [InlineData("long n;\nawait using (var d = new System.IO.MemoryStream()) { n = d.Length; }\nn", "0")]

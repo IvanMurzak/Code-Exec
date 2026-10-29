@@ -169,6 +169,24 @@ namespace CodeExecTests
         }
 
         [Fact]
+        public void HostCapsTheBudget()
+        {
+            var runner = Fixtures.Runner(configure: o => o.MaxTimeoutMs = 300);
+            foreach (var timeoutMs in new[] { 0, 60_000 }) // the host default (120 s) and a longer request both get the cap
+            {
+                var watch = Stopwatch.StartNew();
+                var result = runner.Execute(new ExecuteRequest { Code = "while (true) { }", TimeoutMs = timeoutMs });
+                Assert.Equal(ErrorKind.Timeout, result.ErrorKind);
+                Assert.Contains("300 ms", result.Error);
+                Assert.InRange(watch.ElapsedMilliseconds, 250, 5000);
+            }
+            Assert.Contains("100 ms", runner.Execute(new ExecuteRequest { Code = "while (true) { }", TimeoutMs = 100 }).Error); // a shorter one stays
+            var unbounded = Fixtures.Runner(configure: o => { o.DefaultTimeoutMs = 0; o.MaxTimeoutMs = 200; });
+            Assert.Contains("200 ms", unbounded.Execute(new ExecuteRequest { Code = "while (true) { }" }).Error);
+            Assert.Equal(0, new CodeRunnerOptions().MaxTimeoutMs);
+        }
+
+        [Fact]
         public void ReusedAssemblyIsReArmedOnEveryRunButATimedOutOneIsNotReused()
         {
             // Mono path: one loaded assembly per request, the guard re-armed by each run (it is no static state)...
@@ -200,6 +218,106 @@ namespace CodeExecTests
             var callback = (Func<int>)AppDomain.CurrentDomain.GetData("codeexec-callback")!;
             AppDomain.CurrentDomain.SetData("codeexec-callback", null);
             Assert.Equal(45, callback());
+        }
+
+        // Work a snippet starts on another thread belongs to its run: once the run has ended, it stops at its next check.
+        // Without that, each of these spins forever after the run (the test then times out waiting for it).
+        [Theory]
+        [InlineData("var t = new System.Threading.Thread(() => { while (true) { } }) { IsBackground = true };\nt.Start();\nreturn (Func<bool>)(() => t.Join(10_000));")]
+        [InlineData("void Spin() { var n = 0L; while (n >= 0) n++; }\nvar t = new System.Threading.Thread(Spin) { IsBackground = true };\nt.Start();\nreturn (Func<bool>)(() => t.Join(10_000));")]
+        [InlineData("var t = new System.Threading.Thread(o => { while (o != null) { } }) { IsBackground = true };\nt.Start(1);\nreturn (Func<bool>)(() => t.Join(10_000));")]
+        // Waits until the work runs inside its try: work that starts only after the run has ended stops at its first check.
+        [InlineData("var started = new System.Threading.ManualResetEvent(false);\nvar done = new System.Threading.ManualResetEvent(false);\nSystem.Threading.ThreadPool.QueueUserWorkItem(_ => { try { started.Set(); while (true) { } } finally { done.Set(); } });\nstarted.WaitOne();\nreturn (Func<bool>)(() => done.WaitOne(10_000));")]
+        [InlineData("var t = Task.Run(() => { while (true) { } });\nreturn (Func<bool>)(() => ((IAsyncResult)t).AsyncWaitHandle.WaitOne(10_000));")]
+        [InlineData("var t = Task.Run(() => { var n = 0; while (true) n++; return n; });\nreturn (Func<bool>)(() => ((IAsyncResult)t).AsyncWaitHandle.WaitOne(10_000) && t.Exception!.InnerException is TimeoutException);")]
+        [InlineData("var t = Task.Run(async () => { while (true) await Task.Yield(); });\nreturn (Func<bool>)(() => ((IAsyncResult)t).AsyncWaitHandle.WaitOne(10_000));")]
+        [InlineData("var t = Task.Factory.StartNew(() => { while (true) { } }, TaskCreationOptions.LongRunning);\nreturn (Func<bool>)(() => ((IAsyncResult)t).AsyncWaitHandle.WaitOne(10_000));")]
+        [InlineData("var t = new Task(() => { while (true) { } });\nt.Start();\nreturn (Func<bool>)(() => ((IAsyncResult)t).AsyncWaitHandle.WaitOne(10_000));")]
+        // Asynchronous task work belongs to the run until its task ends, also when its first await returned before the run ended.
+        [InlineData("var t = Task.Run(async () => { await Task.Delay(200); while (true) { } });\nSystem.Threading.Thread.Sleep(50);\nreturn (Func<bool>)(() => ((IAsyncResult)t).AsyncWaitHandle.WaitOne(10_000));")]
+        // Code that asynchronous task work starts without a wrapper (a fire-and-forget async method) carries the run on.
+        [InlineData("class K { public static System.Threading.ManualResetEvent Done = new System.Threading.ManualResetEvent(false); public static async Task Spin() { try { await Task.Delay(300); while (true) { } } finally { Done.Set(); } } }\nTask.Run(async () => { _ = K.Spin(); await Task.Yield(); }).Wait();\nreturn (Func<bool>)(() => K.Done.WaitOne(10_000));")]
+        // Started by work the run started: it belongs to the same run.
+        [InlineData("var inner = new TaskCompletionSource<Task>();\nTask.Run(() => inner.SetResult(Task.Run(() => { while (true) { } })));\nvar t = inner.Task.Result;\nreturn (Func<bool>)(() => ((IAsyncResult)t).AsyncWaitHandle.WaitOne(10_000));")]
+        // Caught: the stop passes the agent's catch-all.
+        [InlineData("var t = new System.Threading.Thread(() => { while (true) { try { System.Threading.Thread.Sleep(1); } catch (Exception) { } } }) { IsBackground = true };\nt.Start();\nreturn (Func<bool>)(() => t.Join(10_000));")]
+        public void WorkTheSnippetStartedStopsWhenItsRunEnds(string code)
+        {
+            // The test takes the snippet's own delegate out (a host must not): it waits for the work after the run.
+            var result = Fixtures.Runner(configure: o => o.ValueConverter = value => value).Execute(new ExecuteRequest { Code = code });
+            Assert.True(result.Success, result.Error + " " + string.Join(" | ", result.Diagnostics));
+            Assert.True(((Func<bool>)result.Value!)(), "the work is still running after its run ended");
+        }
+
+        [Theory]
+        [InlineData("var t = new System.Threading.Thread(() => { while (true) { } });\nt.Start();\nt.Join();\n1")]
+        [InlineData("Task.Run(() => { while (true) { } }).ContinueWith(_ => { }).Wait();\n1")]
+        // A void task entry faults with the stop (only thread entries swallow it): the snippet does not carry on after Wait.
+        [InlineData("var stop = false;\nTask.Run(() => { while (!stop) { } }).Wait();\nConsole.WriteLine(\"after\");")]
+        public void BudgetSpentInWorkTheSnippetWaitsForIsATimeout(string code)
+        {
+            var result = Fixtures.Runner().Execute(new ExecuteRequest { Code = code, TimeoutMs = 300 });
+            Assert.True(ErrorKind.Timeout == result.ErrorKind, $"{result.ErrorKind}: {result.Error}");
+            Assert.Contains("The snippet ran longer than its time budget of 300 ms (timeoutMs)", result.Error);
+            Assert.DoesNotContain(result.Logs, l => l.Message == "after");
+        }
+
+        [Fact]
+        public void RecursionStoppedInAThreadTheSnippetWaitsForIsAnError()
+        {
+            var result = Fixtures.Runner().Execute(new ExecuteRequest { Code = "int R(int n) => R(n + 1) + 1;\nvar t = new System.Threading.Thread(() => { R(0); });\nt.Start();\nt.Join();\nreturn 5;" });
+            Assert.Equal(ErrorKind.Runtime, result.ErrorKind);
+            Assert.StartsWith("System.InsufficientExecutionStackException: Recursion too deep", result.Error);
+        }
+
+        [Fact]
+        public void WorkerFramesAreNotTheAgents()
+        {
+            var result = Fixtures.Runner().Execute(new ExecuteRequest { Code = "Task.Run(() => { throw new InvalidOperationException(\"w\"); }).Wait();" });
+            Assert.Equal(ErrorKind.Runtime, result.ErrorKind);
+            Assert.Contains("InvalidOperationException: w", result.Error);
+            Assert.Contains("snippet.cs:line 1", result.Error);
+            Assert.DoesNotContain(ExecutionGuard.TypeName, result.Error);
+        }
+
+        [Fact]
+        public void UnfinishedWorkIsReportedAsAWarning()
+        {
+            var result = Fixtures.Runner().Execute(new ExecuteRequest { Code = "new System.Threading.Thread(() => { while (true) { } }) { IsBackground = true }.Start();\n1" });
+            Assert.True(result.Success, result.Error);
+            Assert.Contains(result.Logs, l => l.Level == "warning" && l.Message.StartsWith("1 thread(s) or task(s) the snippet started had not finished"));
+            var joined = Fixtures.Runner().Execute(new ExecuteRequest { Code = "var t = new System.Threading.Thread(() => { });\nt.Start();\nt.Join();\n1" });
+            Assert.Empty(joined.Logs);
+        }
+
+        // A stop on a thread the snippet started would end the process if it went unhandled there. In a child process.
+        [Theory]
+        [InlineData("new System.Threading.Thread(() => { while (true) { } }).Start();\nwhile (true) { }", "Timeout")]
+        [InlineData("System.Threading.ThreadPool.QueueUserWorkItem(_ => { while (true) { } });\nwhile (true) { }", "Timeout")]
+        // Nothing but the work itself carries the run: an async void continuation or a timer the work created is not
+        // stopped (an exception unhandled there would end the process).
+        [InlineData("new System.Threading.Thread(() => System.Threading.Thread.Sleep(3000)) { IsBackground = true }.Start();\nnew System.Threading.Thread(async () => { await Task.Delay(100); for (var i = 0; i < 1000; i++) { } }) { IsBackground = true }.Start();\n1", "None")]
+        [InlineData("new System.Threading.Thread(() => System.Threading.Thread.Sleep(3000)) { IsBackground = true }.Start();\nSystem.Threading.ThreadPool.QueueUserWorkItem(async _ => { await Task.Delay(100); for (var i = 0; i < 1000; i++) { } });\n1", "None")]
+        [InlineData("class Keep { public static object T; }\nnew System.Threading.Thread(() => System.Threading.Thread.Sleep(3000)) { IsBackground = true }.Start();\nTask.Run(() => { Keep.T = new System.Threading.Timer(_ => { for (int i = 0; i < 10; i++) { } }, null, 300, 100); }).Wait();\n1", "None")]
+        // A foreground thread left spinning would also keep the process from exiting.
+        [InlineData("new System.Threading.Thread(() => { while (true) { } }).Start();\n1", "None")]
+        public void StoppedThreadsNeverEndTheProcess(string code, string kind)
+        {
+            var (errorKind, error) = ChildProcess.Execute(code, timeoutMs: 300, lingerMs: 1000);
+            Assert.True(errorKind == kind, errorKind + ": " + error);
+        }
+
+        [Fact]
+        public void WorkACallbackStartsAfterTheRunIsItsOwn()
+        {
+            var runner = Fixtures.Runner(configure: o => o.ValueConverter = value => value);
+            var result = runner.Execute(new ExecuteRequest
+            {
+                Code = "return (Func<int>)(() => Task.Run(() => { var watch = System.Diagnostics.Stopwatch.StartNew(); var n = 0; while (watch.ElapsedMilliseconds < 300) n++; return 1; }).Result);",
+                TimeoutMs = 100,
+            });
+            Assert.True(result.Success, result.Error);
+            Assert.Equal(1, ((Func<int>)result.Value!)());
         }
 
         [Fact]
@@ -244,6 +362,18 @@ namespace CodeExecTests
         [InlineData("Func<int, int> s = static x => x + 1;\ns(1)", "2")]
         [InlineData("using TI = System.Threading.Tasks.Task<int>;\nclass C { public async TI F() => await Task.FromResult(1); }\nawait new C().F()", "1")]
         [InlineData("int[] arr = { 1 };\nFunc<int> one = () => arr[0];\n$\"{one()}{((Func<int>)(() => 2))()}\"", "12")]
+        // Work handed to a thread or task start is wrapped, cast to the delegate type it had: the same overload, the same value.
+        [InlineData("var x = 0;\nvar t = new System.Threading.Thread(() => x = 5);\nt.Start();\nt.Join();\nx", "5")]
+        [InlineData("var x = 0;\nSystem.Threading.Thread t = new(() => { x = 6; });\nt.Start();\nt.Join();\nx", "6")]
+        [InlineData("var done = new System.Threading.ManualResetEvent(false);\nvar x = 0;\nSystem.Threading.ThreadPool.QueueUserWorkItem(o => { x = (int)o!; done.Set(); }, 7);\ndone.WaitOne();\nx", "7")]
+        [InlineData("Task.Run(async () => { await Task.Delay(1); return 8; }).Result", "8")]
+        [InlineData("await Task.Run(async () => await Task.FromResult(9))", "9")]
+        [InlineData("Task.Factory.StartNew(o => (int)o! * 2, 5).Result", "10")]
+        [InlineData("Task.Run(() => new { A = 11 }).Result.A", "11")]
+        [InlineData("int Twelve() => 12;\nTask.Run(Twelve).Result", "12")]
+        [InlineData("Func<int> f = null;\ntry { Task.Run(f); } catch (ArgumentNullException) { return 13; }\nreturn 0;", "13")]
+        [InlineData("try { Task.Run(() => { throw new InvalidOperationException(\"w\"); }).Wait(); } catch (AggregateException e) { return e.InnerException!.Message; }\nreturn \"\";", "w")]
+        [InlineData("System.Linq.Expressions.Expression<Func<Task<int>>> e = () => Task.Run(() => 1);\ne.Body.ToString().Contains(\"Worker\")", "False")]
         public async Task GuardedCodeKeepsItsMeaning(string code, string expected)
         {
             var result = await Fixtures.Runner().ExecuteAsync(new ExecuteRequest { Code = code });

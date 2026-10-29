@@ -59,8 +59,11 @@ ExecuteResult result = await runner.ExecuteAsync(new ExecuteRequest { Code = "Ap
 - `ValueConverter` turns the result into something that outlives the snippet (Unity: ReflectorNet JSON).
 - Execution guards ([§3.6](spec/contract.md#36-execution-guards)): runaway recursion stops with an error before a stack
   overflow could end the host, and loops stop with `Timeout` once the time budget is spent, also in synchronous code
-  on the main thread. Budget: `TimeoutMs` on the request, else `DefaultTimeoutMs` (120 s); stack allowance
-  `MaxStackBytes` (1 MiB); `ExecutionGuards = false` turns them off.
+  on the main thread. Budget: `TimeoutMs` on the request, else `DefaultTimeoutMs` (120 s), at most `MaxTimeoutMs`
+  (0 = no cap); stack allowance `MaxStackBytes` (1 MiB); `ExecutionGuards = false` turns them off. Threads and tasks
+  the snippet starts (`new Thread`, `ThreadPool`, `Task.Run`, `StartNew`) stop once its run has ended.
+- Agent tools: expose `timeoutMs` as a `timeout` argument, default to about 30 s, and cap it below the tool timeout
+  ([§1](spec/contract.md#1-request)).
 - Output is limited before it reaches the agent ([§6](spec/contract.md#6-output-limits)): a text value, the logs (first
   and last lines kept, 2k per line) and the error, 20k characters each by default (`MaxValueChars`, `MaxLogChars`,
   `MaxLogLineChars`, `MaxErrorChars` on the request; 0 = no limit). Includes stay inside `IncludeRoot` unless `AllowIncludeOutsideRoot`.
@@ -77,7 +80,8 @@ code_exec.run("x = 21\nx * 2", include=["helpers"], include_root=".ai-game-dev/s
 code_exec.run_b64(base64_json_request)   # JSON in, JSON out: one string literal from C++
 code_exec.run("print('x')", max_log_chars=0)   # the same limits as C# (JSON: maxLogChars, ...); 0 = no limit
 code_exec.run("while True: pass", timeout_ms=5000)   # stopped by a watchdog: errorKind Timeout (JSON: timeoutMs)
-code_exec.set_default_timeout_ms(60000)               # the budget of requests without one (default 120000; 0 = none)
+code_exec.set_default_timeout_ms(30000)               # the budget of requests without one (default 120000; 0 = none)
+code_exec.set_max_timeout_ms(280000)                  # the most a request may ask for (default 0 = no cap)
 code_exec.set_max_recursion_limit(3000)               # Python < 3.12: the most a snippet's sys.setrecursionlimit sets (0 = no cap)
 ```
 

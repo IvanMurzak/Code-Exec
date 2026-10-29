@@ -13,7 +13,7 @@ One request/response shape for every runtime (C# and Python) and every host (Uni
 | `include` | string[] | Files or folders to compile/load with the snippet (§1.1). |
 | `entry` | `{ type, method }` | C# only. Full-source mode: the code is compiled verbatim and `type.method` is invoked. |
 | `parameters` | `{ name, type, value }[]` | C# only. Arguments passed to the snippet; `type` is a host type, `value` an already-deserialized object. |
-| `timeoutMs` | int | The snippet's time budget. A snippet still running when it is spent stops with `Timeout`: C# through the execution guards (§3.6) and by no longer awaiting an asynchronous result, Python through a watchdog (§4). `0` or absent = the host's default (`120000` unless the host sets another; a host default of `0` = no bound). |
+| `timeoutMs` | int | The snippet's time budget. A snippet still running when it is spent stops with `Timeout`: C# through the execution guards (§3.6) and by no longer awaiting an asynchronous result, Python through a watchdog (§4). `0` or absent = the host's default (`120000` unless the host sets another; a host default of `0` = no bound). A host may cap it (C# `CodeRunnerOptions.MaxTimeoutMs`, Python `code_exec.set_max_timeout_ms`; `0` = no cap, the default): a longer budget, or none, becomes the cap. |
 | `imports` | string[] | Python only. Modules the host binds into the snippet's namespace before it runs (`unreal`). |
 | `includeRoot` | string | Python JSON entry point only (`run_json` / `run_b64`): folder relative `include` paths resolve against. |
 | `includeOutsideRoot` | bool | Python JSON entry point only: the host accepts includes outside the include root (§1.1). Default `false`. |
@@ -25,6 +25,11 @@ One request/response shape for every runtime (C# and Python) and every host (Uni
 Every field but `code` is optional. For the four limits, `0` means no limit; a negative (or non-integer) limit or
 `timeoutMs` is `InvalidRequest`. A request without them gets the defaults. A field of the wrong JSON type is
 `InvalidRequest`.
+
+Hosts that serve agents should let the agent pass `timeoutMs` (a `timeout` argument of their execute tool) and keep
+the budget short by default: an endless loop costs the agent the whole budget before it hears back. Recommended: a host
+default of 30000 for interactive use, and a cap a few seconds below the host's own tool timeout, so the snippet's
+`Timeout` answers before the host gives up.
 
 ### 1.1. Includes
 - Relative paths resolve against the host's include root. An include must lie **inside** that root (the root itself
@@ -58,6 +63,9 @@ Every field but `code` is optional. For the four limits, `0` means no limit; a n
 The snippet is parsed as C# **script** code and rewritten into one ordinary compilation unit:
 
 - `using` directives (including aliases and `using static`) go to the top, after the host defaults and `usings`;
+  `global using` goes before those. A using declaration or statement (`using var x = ...;`, `using T x = ...;`,
+  `await using ...`, `using (...)`) is a statement wherever it stands, also as the first line: only `using N;`,
+  `using static`, `using unsafe`, an alias (`using A = B;`) and `global using` are directives;
 - type declarations (class, struct, record, interface, enum, delegate, namespace) stay top-level;
 - members **without** modifiers live in the entry method's body, in source order, so they see the snippet's locals:
   `var x = 1;` is a local variable and `int Twice(int n) => n * 2;` a local function;
@@ -145,6 +153,28 @@ the host turns them off (`CodeRunnerOptions.ExecutionGuards`):
   type, `Exception`, `SystemException` or the stop's own type) get a filter that lets it pass, so it reaches the runtime;
   `finally` blocks still run. That filter makes a few invalid programs compile (a later `catch` that an earlier
   catch-all would hide: `CS0160`).
+- **Threads and tasks.** A delegate the agent's code hands to `new Thread(...)`, `ThreadPool.QueueUserWorkItem` /
+  `UnsafeQueueUserWorkItem`, `Task.Run`, `Task.Factory.StartNew` (any `TaskFactory.StartNew`) or `new Task(...)` belongs
+  to the run, and so do the threads and tasks it starts the same way. It runs under the same guards and, once the run
+  has ended (finished or timed out), stops at its next check with
+  `System.TimeoutException: The snippet's run has ended, so this thread or task it started was stopped: ...`. It passes
+  the agent's catch clauses like any stop. A thread or thread-pool entry swallows a stop (an exception left unhandled
+  on a thread would end the process); a task faults with it. Asynchronous task work (`Task.Run(async () => ...)`)
+  belongs to the run until its task ends, across its awaits. A stop inside such work while the snippet waited for it
+  (`Join`, `Wait`) ends the run too: `Timeout` for the budget, `Runtime` (`Recursion too deep`) for the stack. When
+  work of the run had not finished as it ended, the response gets one `warning` log entry: `N thread(s) or task(s) the
+  snippet started had not finished when it ended: they are stopped at their next loop iteration or call. Join or await
+  work the snippet starts.` (work created but never started counts too). Not covered, so it may outlive the run: timers
+  (`System.Threading.Timer`, `System.Timers.Timer`, engine timers) and other callbacks; an `async void` delegate's code
+  after its first `await` (`new Thread(async () => ...)`); work blocked in a wait or a host call (it stops once that
+  returns); threads started by native code or by host code the snippet calls; a start written through an alias of
+  `Thread` / `Task`, inside a query expression, or whose delegate type cannot be named (an anonymous type); a delegate
+  stored first and started later through another API; and work that a callback left behind starts after the run (it
+  is the callback's own). Caveat: a timer or other callback created inside asynchronous task work inherits the run
+  through its execution context; its code is stopped like the task's, and an exception unhandled in a timer callback
+  ends the process. Cost: a few hundred ns per start; once a run that started work has ended, every clock check also
+  looks whose work it runs while work of a run still executes (on a reused Mono assembly, for good once a run used
+  asynchronous task work): about 4 ns per call of a call-heavy loop then.
 - **After the run.** A run that finished lifts the time budget: callbacks it left behind (events, stored delegates)
   keep only the stack check. A timed-out run keeps its stop, so what still runs of it (an asynchronous continuation,
   a thread it started) stops at its next check; on a host that cannot unload (Mono), its assembly is not reused.
@@ -174,7 +204,19 @@ the host turns them off (`CodeRunnerOptions.ExecutionGuards`):
   whose body begins with `try` or `with` (`while True: try: ...`): such a run hangs the interpreter there (3.11+ stop
   it). It needs `ctypes` (`PyThreadState_SetAsyncExc`); without it
   the budget is not enforced. The stop is disarmed before the runner returns: none reaches the host afterwards.
-  Threads the snippet started are not stopped.
+- **Threads.** Threads the snippet starts (`threading.Thread.start`, `threading.Timer` included, called from the
+  snippet's thread or from one of those threads while it runs) may not outlive it. When it ends (finished or timed
+  out), a `threading.Timer` that has not fired is cancelled, and every other such thread still alive gets
+  `code_exec.SnippetThreadStopped` (a `BaseException`, the same mechanism as the time budget) whenever the snippet's or
+  an include's code is what it runs, checked every 100 ms while such code is on its stack. The thread ends quietly
+  (nothing is printed). One `warning` log entry counts the threads still running (cancelled timers aside): `N thread(s)
+  the snippet started were still running when it ended: each is stopped while it runs the snippet's code. Join threads
+  before the snippet returns.` A thread inside library or host code (`queue.get`) gets no stop until it returns to the
+  snippet's code; one with none of it left on its stack (a `concurrent.futures` worker waiting for work) is left alone
+  from then on; one that catches `BaseException` every time is not stopped. `threading.Thread.start` is replaced only
+  while a snippet runs. Not covered: `_thread.start_new_thread`, threads started by C code, and threads started by the
+  snippet's threads after it has ended. Threads that host code starts while the snippet calls it count as the
+  snippet's. Needs `ctypes`, like the time budget.
 - **Recursion** ends with Python's own `RecursionError` (`Runtime`) at the interpreter's recursion limit. Python 3.11 and
   older do not check the C stack: past a few thousand, a raised limit lets C-level recursion (`repr` / `json.dumps` of a
   deeply nested list) overflow it, which ends the host. So on Python < 3.12 a snippet's (and its includes')
@@ -222,6 +264,9 @@ Lengths are in characters: UTF-16 code units in C#, code points in Python. A lim
   means the host's default (120000), a negative value is `InvalidRequest`. Full-source mode gets the request's `usings`
   and auto-import, and `CE0003` when names stay unresolved (§3.2). C#: expression-bodied lambdas that are delegates are
   guarded too (§3.6). Python < 3.12: a snippet's `sys.setrecursionlimit` is capped (default 3000) with a warning (§4).
+  Threads and tasks a snippet starts stop when its run ends, with a `warning` when some had not finished (C# §3.6,
+  Python §4). Hosts can cap `timeoutMs` (§1). C#: a using declaration (`using var x = ...;`) is a statement also as the
+  first line, and `global using` goes before the runtime's usings (§3.1).
 
 - **v0.3.1** — C#: `static readonly` fields of immutable types are not static state (§3.5). Python is unchanged.
 - **v0.3** — output limits (§6): request fields `maxValueChars`, `maxLogChars`, `maxLogLineChars`, `maxErrorChars`
