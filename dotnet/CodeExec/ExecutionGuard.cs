@@ -48,6 +48,14 @@ namespace com.IvanMurzak.CodeExec
         /// </summary>
         public const string CatchFilter = "global::" + TypeName + ".Running()";
 
+        /// <summary>
+        /// The method that wraps a delegate the agent's code hands to a thread or task start (<c>new Thread(...)</c>,
+        /// <c>ThreadPool.QueueUserWorkItem</c>, <c>Task.Run</c>, <c>Task.Factory.StartNew</c>, <c>new Task(...)</c>), cast
+        /// to its exact delegate type: <c>Worker((T)(delegate))</c>. The work then belongs to the run that started it and is
+        /// stopped once that run has ended (spec §3.6).
+        /// </summary>
+        public const string Worker = "global::" + TypeName + ".Worker";
+
         internal const int StoppedByTime = 1;
 
         /// <summary>
@@ -59,14 +67,26 @@ namespace com.IvanMurzak.CodeExec
         /// call, and on a loop's first iteration, then after 2, 4, ... up to 256 iterations while checks are less than
         /// 10 ms apart, back to every iteration when they are not: slow iterations overshoot the budget by about 20 ms,
         /// fast ones pay one clock read per 256 iterations. The statics are shared by all threads: a race only shifts a
-        /// check.
+        /// check. Work handed to a thread or task start (<see cref="Worker"/>) carries its run in an <c>AsyncLocal</c> (it
+        /// flows into the work's awaits and the tasks it starts in turn); once a run with such work has ended, every clock
+        /// check reads it, and work of an ended run stops there. A thread entry swallows the stop: an exception left
+        /// unhandled on a thread would end the process.
         /// </summary>
         public const string Source = @"#line hidden
 internal static class __CodeExecGuard
 {
     public static int Calls, Jumps;
-    static int _start, _last, _interval, _budget, _stopped, _maxStack, _baseThread;
+    static int _start, _last, _interval, _budget, _stopped, _maxStack, _baseThread, _orphans;
     static long _base;
+    static Run _current;
+    static readonly global::System.Threading.AsyncLocal<Run> _worker = new global::System.Threading.AsyncLocal<Run>();
+
+    /// <summary>One run: whether it has ended, and how much of the work it started has not finished.</summary>
+    public sealed class Run
+    {
+        public volatile bool Ended;
+        public int Pending;
+    }
 
     public static unsafe void Arm(int budgetMs, int maxStackBytes)
     {
@@ -82,6 +102,19 @@ internal static class __CodeExecGuard
 
     public static int Stopped() => _stopped;
 
+    public static object Begin() => _current = new Run();
+
+    /// <summary>Ends a run: its work stops at its next clock check. Returns how much of that work has not finished.</summary>
+    public static int End(object run)
+    {
+        var ended = (Run)run;
+        ended.Ended = true;
+        var pending = global::System.Threading.Volatile.Read(ref ended.Pending);
+        if (pending > 0)
+            _orphans = 1;
+        return pending;
+    }
+
     public static bool Init()
     {
         if (--Calls <= 0)
@@ -89,7 +122,99 @@ internal static class __CodeExecGuard
         return true;
     }
 
-    public static bool Running() => _stopped == 0;
+    public static bool Running() => _stopped == 0 && (_orphans == 0 || !Orphaned());
+
+    static bool Orphaned()
+    {
+        var run = _worker.Value;
+        return run != null && run.Ended;
+    }
+
+    /// <summary>The run new work belongs to: that of the work starting it, else the run in progress (none after it ended).</summary>
+    static Run Spawn()
+    {
+        var run = _worker.Value;
+        if (run == null)
+        {
+            run = _current;
+            if (run == null || run.Ended)
+                return null; // a callback the run left behind: its work is its own
+        }
+        global::System.Threading.Interlocked.Increment(ref run.Pending);
+        if (run.Ended)
+            _orphans = 1;
+        return run;
+    }
+
+    static Run Enter(Run run)
+    {
+        var outer = _worker.Value;
+        _worker.Value = run;
+        return outer;
+    }
+
+    static void Exit(Run run, Run outer)
+    {
+        _worker.Value = outer;
+        global::System.Threading.Interlocked.Decrement(ref run.Pending);
+    }
+
+    public static global::System.Threading.ThreadStart Worker(global::System.Threading.ThreadStart work)
+    {
+        var run = work == null ? null : Spawn();
+        if (run == null)
+            return work;
+        return () => { var outer = Enter(run); try { work(); } catch (global::System.Exception) when (!Running()) { } finally { Exit(run, outer); } };
+    }
+
+    public static global::System.Threading.ParameterizedThreadStart Worker(global::System.Threading.ParameterizedThreadStart work)
+    {
+        var run = work == null ? null : Spawn();
+        if (run == null)
+            return work;
+        return state => { var outer = Enter(run); try { work(state); } catch (global::System.Exception) when (!Running()) { } finally { Exit(run, outer); } };
+    }
+
+    public static global::System.Threading.WaitCallback Worker(global::System.Threading.WaitCallback work)
+    {
+        var run = work == null ? null : Spawn();
+        if (run == null)
+            return work;
+        return state => { var outer = Enter(run); try { work(state); } catch (global::System.Exception) when (!Running()) { } finally { Exit(run, outer); } };
+    }
+
+    public static global::System.Action Worker(global::System.Action work)
+    {
+        var run = work == null ? null : Spawn();
+        if (run == null)
+            return work;
+        return () => { var outer = Enter(run); try { work(); } catch (global::System.Exception) when (!Running()) { } finally { Exit(run, outer); } };
+    }
+
+    public static global::System.Action<T> Worker<T>(global::System.Action<T> work)
+    {
+        var run = work == null ? null : Spawn();
+        if (run == null)
+            return work;
+        return state => { var outer = Enter(run); try { work(state); } catch (global::System.Exception) when (!Running()) { } finally { Exit(run, outer); } };
+    }
+
+    // A value-returning entry (a task's) keeps the stop: the task faults with it, which ends nothing.
+    public static global::System.Func<TResult> Worker<TResult>(global::System.Func<TResult> work)
+    {
+        var run = work == null ? null : Spawn();
+        if (run == null)
+            return work;
+        return () => { var outer = Enter(run); try { return work(); } finally { Exit(run, outer); } };
+    }
+
+    public static global::System.Func<T, TResult> Worker<T, TResult>(global::System.Func<T, TResult> work)
+    {
+        var run = work == null ? null : Spawn();
+        if (run == null)
+            return work;
+        return state => { var outer = Enter(run); try { return work(state); } finally { Exit(run, outer); } };
+    }
 
     public static unsafe void Call()
     {
@@ -126,6 +251,8 @@ internal static class __CodeExecGuard
     {
         if (_stopped == 0)
         {
+            if (_orphans != 0 && Orphaned())
+                throw new global::System.TimeoutException(""The snippet's run has ended, so this thread or task it started was stopped: work a snippet starts must finish (join or await it) before the snippet returns."");
             if (_budget <= 0 || unchecked(global::System.Environment.TickCount - _start) < _budget)
                 return;
             _stopped = 1;
@@ -147,6 +274,14 @@ internal static class __CodeExecGuard
         /// </summary>
         internal static void Arm(Type guard, int budgetMs, int maxStackBytes) =>
             guard.GetMethod("Arm", BindingFlags.Public | BindingFlags.Static)!.Invoke(null, new object[] { budgetMs, maxStackBytes });
+
+        /// <summary>Starts a run: the threads and tasks its code starts belong to it (the token for <see cref="End"/>).</summary>
+        internal static object Begin(Type guard) =>
+            guard.GetMethod("Begin", BindingFlags.Public | BindingFlags.Static)!.Invoke(null, null)!;
+
+        /// <summary>Ends the run <paramref name="run"/>: its threads and tasks stop at their next check. Returns how many had not finished.</summary>
+        internal static int End(Type guard, object run) =>
+            (int)guard.GetMethod("End", BindingFlags.Public | BindingFlags.Static)!.Invoke(null, new[] { run })!;
 
         /// <summary><see cref="StoppedByTime"/>, 2 (stopped by the stack check) or 0 (not stopped).</summary>
         internal static int Stopped(Type guard) =>

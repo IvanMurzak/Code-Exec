@@ -16,19 +16,24 @@ namespace CodeExecTests
 
         public static int Main(string[] args)
         {
-            if (args.Length != 2 || args[0] != Flag)
+            if (args.Length != 4 || args[0] != Flag)
             {
-                Console.Error.WriteLine("usage: CodeExec.Tests " + Flag + " <base64 snippet>");
+                Console.Error.WriteLine("usage: CodeExec.Tests " + Flag + " <base64 snippet> <timeoutMs> <lingerMs>");
                 return 2;
             }
             var code = Encoding.UTF8.GetString(Convert.FromBase64String(args[1]));
-            var result = Fixtures.Runner().Execute(new ExecuteRequest { Code = code });
+            var result = Fixtures.Runner().Execute(new ExecuteRequest { Code = code, TimeoutMs = int.Parse(args[2]) });
             Console.Out.Write(result.ErrorKind + "\n" + result.Error);
+            Console.Out.Flush();
+            System.Threading.Thread.Sleep(int.Parse(args[3])); // what the snippet left running gets the time to end the process
             return 0;
         }
 
-        /// <summary>The child's <see cref="ErrorKind"/> and error text; fails when the child did not end normally.</summary>
-        public static (string ErrorKind, string Error) Execute(string code)
+        /// <summary>
+        /// The child's <see cref="ErrorKind"/> and error text; fails when the child did not end normally, also when what the
+        /// snippet left running ends it within <paramref name="lingerMs"/> or keeps it from exiting.
+        /// </summary>
+        public static (string ErrorKind, string Error) Execute(string code, int timeoutMs = 0, int lingerMs = 0)
         {
             // The build output, not Assembly.Location: the .NET Framework test host runs a shadow copy without its dependencies.
             var assembly = Fixtures.Path(typeof(ChildProcess).Assembly.GetName().Name + ".dll");
@@ -41,10 +46,10 @@ namespace CodeExecTests
             var snippet = Convert.ToBase64String(Encoding.UTF8.GetBytes(code));
 #if NETFRAMEWORK
             start.FileName = Path.ChangeExtension(assembly, ".exe");
-            start.Arguments = Flag + " " + snippet;
+            start.Arguments = Flag + " " + snippet + " " + timeoutMs + " " + lingerMs;
 #else
             start.FileName = Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") is { Length: > 0 } host ? host : "dotnet";
-            start.Arguments = "exec \"" + assembly + "\" " + Flag + " " + snippet;
+            start.Arguments = "exec \"" + assembly + "\" " + Flag + " " + snippet + " " + timeoutMs + " " + lingerMs;
 #endif
             using var process = Process.Start(start)!;
             var stderr = process.StandardError.ReadToEndAsync();

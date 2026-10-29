@@ -37,6 +37,7 @@ _MAX_CAUSES = 5  # chained exceptions (__cause__ / __context__) reported after t
 # Time budget (spec section 1, timeoutMs) of a request that sets none, in milliseconds; 0 = no bound.
 TIMEOUT_MS = 120000
 _default_timeout_ms = TIMEOUT_MS
+_max_timeout_ms = 0  # the highest budget a request may ask for (set_max_timeout_ms); 0 = no cap
 _REFIRE_SECONDS = 0.1  # a snippet that catches the stop is stopped again this often
 _POLL_SECONDS = 0.02  # how often the watchdog looks whether the snippet ended
 _MARGIN_SECONDS = 0.05  # a snippet ending this long before its deadline was never stopped: no need to wait for the watchdog
@@ -81,6 +82,23 @@ def set_default_timeout_ms(timeout_ms):
     _default_timeout_ms = timeout_ms
 
 
+def set_max_timeout_ms(timeout_ms):
+    """Host hook: the highest time budget a request may ask for (a longer ``timeout_ms`` / ``timeoutMs``, and a run that
+    would have no bound, get this one); 0 = no cap (default)."""
+    global _max_timeout_ms
+    if not _is_count(timeout_ms):
+        raise ValueError("timeout_ms must be an integer >= 0 (0 = no cap)")
+    _max_timeout_ms = timeout_ms
+
+
+def _budget(timeout_ms):
+    """The request's budget, else the host default, at most the host's cap; 0 = no bound."""
+    budget = timeout_ms or _default_timeout_ms
+    if _max_timeout_ms and (not budget or budget > _max_timeout_ms):
+        budget = _max_timeout_ms
+    return budget
+
+
 def set_max_recursion_limit(limit):
     """Host hook: the highest recursion limit a snippet may set with ``sys.setrecursionlimit`` on Python < 3.12 (default
     3000, a limit the host set itself above it stays allowed); 0 = no cap. Python 3.12+ never cap."""
@@ -95,8 +113,9 @@ def run(code, include=(), include_root=None, imports=(), max_value_chars=MAX_VAL
     """Execute ``code`` and return the contract's response as a dict (never raises for snippet errors).
 
     ``include_outside_root``: the host accepts includes outside ``include_root`` (absolute paths, ``..``).
-    ``timeout_ms``: the snippet's time budget; 0 = the host default (:func:`set_default_timeout_ms`). A snippet still
-    running when it is spent is stopped with a ``Timeout`` error (spec section 4).
+    ``timeout_ms``: the snippet's time budget; 0 = the host default (:func:`set_default_timeout_ms`), at most the host's
+    cap (:func:`set_max_timeout_ms`). A snippet still running when it is spent is stopped with a ``Timeout`` error, and
+    threads it started are stopped when it ends (spec section 4).
     """
     result = _empty()
     limits = (max_value_chars, max_log_chars, max_log_line_chars, max_error_chars)
@@ -106,7 +125,7 @@ def run(code, include=(), include_root=None, imports=(), max_value_chars=MAX_VAL
         return _fail(result, "InvalidRequest", "timeoutMs must be an integer >= 0 (0 = the host's default)")
     logs = _Logs(max_log_chars, max_log_line_chars)
     try:
-        _execute(result, logs, code, include, include_root, imports, include_outside_root, timeout_ms or _default_timeout_ms)
+        _execute(result, logs, code, include, include_root, imports, include_outside_root, _budget(timeout_ms))
     except BaseException as error:  # the runner itself failed (a snippet wrecked the interpreter state): still answer
         result["success"], result["value"] = False, None
         _fail(result, "Runtime", "%s: %s (while running the snippet)" % (type(error).__name__, _message(error)))
@@ -168,6 +187,8 @@ def _execute(result, logs, code, include, include_root, imports, include_outside
     prefixes = [_prefix(folder) for folder in folders]
     saved = _HostState(code, sources)
     watchdog = _Watchdog(timeout_ms)
+    agent_files = {SNIPPET_FILE} | {path for path, _ in files}
+    threads = _SnippetThreads(lambda filename: filename in agent_files or _under(filename, prefixes))
     try:
         sys.path[:0] = folders
         if folders:
@@ -181,6 +202,7 @@ def _execute(result, logs, code, include, include_root, imports, include_outside
         with redirect_stdout(out), redirect_stderr(err):
             saved.cap_recursion_limit(logs)
             watchdog.start()
+            threads.start()
             for compiled in file_code:
                 exec(compiled, scope)
             exec(body, scope)
@@ -202,6 +224,7 @@ def _execute(result, logs, code, include, include_root, imports, include_outside
             _make_room(saved)
             watchdog.stop()
         finally:
+            threads.stop(logs)
             out.flush()
             err.flush()
             saved.restore(prefixes)
@@ -297,6 +320,109 @@ class _Watchdog:
                 self._thread_id = None
             except SnippetTimeout:  # delivered while disarming: disarm again
                 pass
+
+
+class SnippetThreadStopped(BaseException):
+    """Raised in a thread the snippet started, once the snippet has ended (spec section 4): threads may not outlive it."""
+
+    def __str__(self):
+        return "The snippet has ended, so this thread it started was stopped: join threads before the snippet returns."
+
+
+class _SnippetThreads:
+    """The threads a snippet starts: ``threading.Thread.start`` called from the snippet's thread, or from one of those
+    threads, while the snippet runs. When it ends, a ``threading.Timer`` not fired yet is cancelled and every other one
+    still alive gets :class:`SnippetThreadStopped` (``PyThreadState_SetAsyncExc``) while it runs the agent's own code
+    (``is_agent_file`` of a frame on its stack), again every ``_REFIRE_SECONDS`` while it does. A thread idle in library
+    code (a pool worker waiting for work) is left alone. The thread swallows the stop: nothing is printed."""
+
+    def __init__(self, is_agent_file):
+        self._is_agent_file = is_agent_file
+        self._threads = []
+        self._owners = set()
+        self._starting = set()  # tracked threads whose start() has not returned yet
+        self._start = None
+
+    def start(self):
+        if _SET_ASYNC_EXC is None:
+            return
+        self._owners.add(threading.get_ident())
+        original = self._start = threading.Thread.start
+        track = self._track
+
+        def start(thread, *args, **kwargs):
+            if threading.get_ident() not in self._owners:
+                return original(thread, *args, **kwargs)
+            track(thread)
+            self._starting.add(thread)
+            try:
+                return original(thread, *args, **kwargs)
+            finally:
+                self._starting.discard(thread)
+
+        threading.Thread.start = start
+
+    def _track(self, thread):
+        run, owners = thread.run, self._owners
+
+        def tracked():
+            ident = threading.get_ident()
+            owners.add(ident)
+            try:
+                try:
+                    run()
+                except SnippetThreadStopped:
+                    pass
+            except SnippetThreadStopped:  # delivered while the first handler ran
+                pass
+            finally:
+                owners.discard(ident)
+                _async_exc(ident, None)  # one raised but not delivered yet must not outlive the thread either
+
+        thread.run = tracked
+        self._threads.append(thread)
+
+    def stop(self, logs):
+        if self._start is None:
+            return
+        threading.Thread.start, self._start = self._start, None
+        self._owners.discard(threading.get_ident())
+        for thread in self._threads:
+            if isinstance(thread, threading.Timer):
+                thread.cancel()
+        alive = [thread for thread in self._threads if thread.is_alive() or thread in self._starting]
+        if not alive:
+            return
+        logs.add("warning", "%d thread(s) the snippet started were still running when it ended: each is stopped while it runs "
+                            "the snippet's code. Join threads before the snippet returns." % len(alive))
+        self._threads = alive
+        self._stop_running()
+        if self._threads:
+            threading.Thread(target=self._watch, name="code_exec thread stopper", daemon=True).start()
+
+    def _stop_running(self):
+        """Raises the stop in every tracked thread that runs the agent's code; forgets threads that ended or idle in
+        library code."""
+        frames = sys._current_frames()
+        running = []
+        for thread in self._threads:
+            if thread in self._starting:  # started from a thread of the snippet just as it ended
+                running.append(thread)
+                continue
+            frame = frames.get(thread.ident)
+            if frame is None or not thread.is_alive():
+                continue
+            while frame is not None and not self._is_agent_file(frame.f_code.co_filename):
+                frame = frame.f_back
+            if frame is not None:
+                _async_exc(thread.ident, SnippetThreadStopped)
+                running.append(thread)
+        self._threads = running
+
+    def _watch(self):
+        while self._threads:
+            time.sleep(_REFIRE_SECONDS)
+            self._stop_running()
 
 
 def _async_exc(thread_id, exception):

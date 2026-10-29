@@ -51,6 +51,13 @@ namespace com.IvanMurzak.CodeExec
         public const int DefaultTimeout = 120_000;
 
         /// <summary>
+        /// The highest time budget a request may ask for (spec §1): a longer <see cref="ExecuteRequest.TimeoutMs"/>, and a
+        /// run that would have no bound, get this one. 0 = no cap (default). A host that lets agents pick the budget sets it
+        /// below its own tool timeout, so the snippet's <c>Timeout</c> answers before the host gives up.
+        /// </summary>
+        public int MaxTimeoutMs { get; set; }
+
+        /// <summary>
         /// Compile the execution guards into every snippet (spec §3.6): runaway recursion is stopped before a stack
         /// overflow ends the process, and loops are stopped once the time budget is spent, also on the host's main
         /// thread. On by default; costs a counter decrement per loop iteration and a stack check per call.
@@ -330,8 +337,13 @@ namespace com.IvanMurzak.CodeExec
             return run.Finish();
         }
 
-        /// <summary>The request's <see cref="ExecuteRequest.TimeoutMs"/>, else the host's default; 0 = no bound.</summary>
-        int TimeBudget(ExecuteRequest request) => request.TimeoutMs > 0 ? request.TimeoutMs : Math.Max(_options.DefaultTimeoutMs, 0);
+        /// <summary>The request's <see cref="ExecuteRequest.TimeoutMs"/>, else the host's default, at most the host's cap; 0 = no bound.</summary>
+        int TimeBudget(ExecuteRequest request)
+        {
+            var budget = request.TimeoutMs > 0 ? request.TimeoutMs : Math.Max(_options.DefaultTimeoutMs, 0);
+            var max = _options.MaxTimeoutMs;
+            return max > 0 && (budget == 0 || budget > max) ? max : budget;
+        }
 
         Execution Start(PreparedSnippet prepared)
         {
@@ -665,18 +677,24 @@ namespace com.IvanMurzak.CodeExec
 
             /// <summary>The snippet's execution guard (spec §3.6), when it was compiled with one.</summary>
             Type? _guard;
+            object? _run;
+            int _budgetMs;
             public bool Guarded => _guard != null;
 
             /// <summary>Starts the guard's time budget for this run (0 = none).</summary>
             public void Arm(int budgetMs)
             {
                 _guard = ExecutionGuard.Find(Loaded!.Assembly);
-                if (_guard != null)
-                    ExecutionGuard.Arm(_guard, budgetMs, Math.Max(_runner._options.MaxStackBytes, 0));
+                if (_guard == null)
+                    return;
+                ExecutionGuard.Arm(_guard, budgetMs, Math.Max(_runner._options.MaxStackBytes, 0));
+                _run = ExecutionGuard.Begin(_guard);
+                _budgetMs = budgetMs;
             }
 
             /// <summary>
-            /// After the run: a finished one lifts the time budget (callbacks the snippet left behind run on, still with the
+            /// After the run: the threads and tasks it started stop at their next check (a warning says how many had not
+            /// finished). A finished run lifts the time budget (callbacks the snippet left behind run on, still with the
             /// stack check). A timed-out one keeps its stop for whatever still runs, and on a host that cannot unload, its
             /// assembly is never reused, so no later run re-arms that guard.
             /// </summary>
@@ -684,6 +702,14 @@ namespace com.IvanMurzak.CodeExec
             {
                 if (_guard == null)
                     return;
+                try
+                {
+                    var pending = _run == null ? 0 : ExecutionGuard.End(_guard, _run);
+                    if (pending > 0)
+                        _logs.Add(new LogEntry("warning", $"{pending} thread(s) or task(s) the snippet started had not finished when it ended: "
+                            + "they are stopped at their next loop iteration or call. Join or await work the snippet starts."));
+                }
+                catch (Exception) { } // a guard that cannot be reached: nothing to end
                 if (_errorKind == ErrorKind.Timeout)
                 {
                     _runner.Forget(_prepared.Entry!);
@@ -742,6 +768,11 @@ namespace com.IvanMurzak.CodeExec
                 object? value = null;
                 try
                 {
+                    // The budget ran out in a thread or task the snippet started while the snippet itself waited (Join,
+                    // Wait): that work was stopped, so the run is no success either.
+                    if (_errorKind == ErrorKind.None && _guard != null && ExecutionGuard.Stopped(_guard) == ExecutionGuard.StoppedByTime)
+                        Fail(ErrorKind.Timeout, $"System.TimeoutException: The snippet ran longer than its time budget of {_budgetMs} ms (timeoutMs); "
+                            + "a thread or task it started was stopped.");
                     if (_errorKind == ErrorKind.None)
                         value = _runner._options.ValueConverter(Result());
                 }

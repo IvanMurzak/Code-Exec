@@ -406,6 +406,24 @@ class TimeBudgetTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             code_exec.set_default_timeout_ms(-1)
 
+    def test_host_caps_the_budget(self):
+        code_exec.set_max_timeout_ms(200)
+        try:
+            for timeout_ms in (0, 60000):  # the host default (120 s) and a longer request both get the cap
+                with self.subTest(timeout_ms):
+                    result, elapsed = self.run_timed("while True: pass", timeout_ms=timeout_ms)
+                    self.assertEqual("Timeout", result["errorKind"])
+                    self.assertIn("200 ms", result["error"])
+                    self.assertLess(elapsed, 5)
+            code_exec.set_default_timeout_ms(0)  # no bound, but the cap still applies
+            self.assertIn("200 ms", code_exec.run("while True: pass")["error"])
+            self.assertIn("100 ms", code_exec.run("while True: pass", timeout_ms=100)["error"])  # a shorter one stays
+        finally:
+            code_exec.set_max_timeout_ms(0)
+            code_exec.set_default_timeout_ms(runner.TIMEOUT_MS)
+        with self.assertRaises(ValueError):
+            code_exec.set_max_timeout_ms(-1)
+
     def test_json_timeout_field(self):
         result = json.loads(code_exec.run_json(json.dumps({"code": "while True: pass", "timeoutMs": 200})))
         self.assertEqual("Timeout", result["errorKind"])
@@ -431,6 +449,65 @@ class TimeBudgetTests(unittest.TestCase):
         self.assertEqual("Runtime", result["errorKind"])
         self.assertTrue(result["error"].startswith("RecursionError"), result["error"])
         self.assertIn("frame(s) left out", result["error"])
+
+
+@unittest.skipIf(runner._SET_ASYNC_EXC is None, "needs ctypes")
+class SnippetThreadTests(unittest.TestCase):
+    """Spec section 4: threads a snippet started are stopped when it ends, while they run its code."""
+
+    SPIN = "import threading\ndef spin():\n    n = 0\n    while True:\n        n += 1\n"
+
+    def wait_gone(self, name, seconds=5):
+        deadline = time.monotonic() + seconds
+        while any(t.name == name for t in threading.enumerate()) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        return not any(t.name == name for t in threading.enumerate())
+
+    def test_thread_left_running_is_stopped_and_reported(self):
+        original = threading.Thread.start
+        code = self.SPIN + "threading.Thread(target=spin, name='ce-spin', daemon=True).start()\n1"
+        result = code_exec.run(code)
+        self.assertTrue(result["success"], result)
+        self.assertTrue(self.wait_gone("ce-spin"), "the snippet's thread still runs")
+        self.assertEqual(["warning"], [entry["level"] for entry in result["logs"]])
+        self.assertTrue(result["logs"][0]["message"].startswith("1 thread(s) the snippet started were still running"))
+        self.assertIs(original, threading.Thread.start)
+
+    def test_thread_of_a_timed_out_snippet_is_stopped(self):
+        code = self.SPIN + "threading.Thread(target=spin, name='ce-spin-timeout', daemon=True).start()\nwhile True: pass"
+        result = code_exec.run(code, timeout_ms=300)
+        self.assertEqual("Timeout", result["errorKind"])
+        self.assertTrue(self.wait_gone("ce-spin-timeout"))
+
+    def test_thread_started_by_a_snippet_thread_and_one_that_catches_the_stop_once(self):
+        code = (self.SPIN + "def stubborn():\n    try:\n        spin()\n    except BaseException:\n        spin()\n"
+                "def parent():\n    threading.Thread(target=spin, name='ce-child', daemon=True).start()\n    stubborn()\n"
+                "t = threading.Thread(target=parent, name='ce-parent', daemon=True)\nt.start()\n"
+                "while not any(x.name == 'ce-child' for x in threading.enumerate()): pass")
+        result = code_exec.run(code, timeout_ms=5000)
+        self.assertTrue(result["success"], result)
+        self.assertTrue(self.wait_gone("ce-child"))
+        self.assertTrue(self.wait_gone("ce-parent"))
+
+    def test_timer_not_fired_yet_is_cancelled(self):
+        code = "import sys, threading\nthreading.Timer(0.3, lambda: setattr(sys, '_code_exec_timer_fired', True)).start()"
+        result = code_exec.run(code)
+        self.assertTrue(result["success"], result)
+        time.sleep(0.6)
+        self.assertFalse(hasattr(sys, "_code_exec_timer_fired"))
+
+    def test_joined_threads_and_host_threads_are_left_alone(self):
+        result = code_exec.run("import threading\nt = threading.Thread(target=lambda: None)\nt.start()\nt.join()\n1")
+        self.assertEqual([], result["logs"])
+        # A thread the host starts from another thread while a snippet runs is the host's own.
+        def host():
+            time.sleep(0.05)
+            threading.Thread(target=time.sleep, args=(0.5,), name="ce-host-child").start()
+        starter = threading.Thread(target=host)
+        starter.start()
+        result = code_exec.run("import time\ntime.sleep(0.3)\n1")
+        starter.join()
+        self.assertEqual([], result["logs"])
 
 
 CAPPED = runner._CAPPED  # Python 3.12+ raise RecursionError before the C stack runs out: no cap there
