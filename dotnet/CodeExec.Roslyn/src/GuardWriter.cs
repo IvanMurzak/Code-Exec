@@ -228,17 +228,21 @@ namespace com.IvanMurzak.CodeExec.Roslyn
             }
         }
 
-        /// <summary>The blocking waits <see cref="Wait"/> rewrites, by name (what the semantic model resolves decides).</summary>
-        static readonly HashSet<string> WaitNames = new HashSet<string> { "Join", "Sleep", "Wait", "WaitAll", "WaitAny", "WaitOne", "GetResult" };
-
         const string Ms = "int", Span = "System.TimeSpan", Token = "System.Threading.CancellationToken";
         const string TaskArray = "System.Threading.Tasks.Task[]", HandleArray = "System.Threading.WaitHandle[]";
+
+        /// <summary>.NET 9+ <c>Task.WaitAll(params ReadOnlySpan&lt;Task&gt;)</c>: rewritten only in its expanded form (see <see cref="Wait"/>).</summary>
+        const string WaitAllSpan = "System.Threading.Tasks.Task.WaitAll(System.ReadOnlySpan<System.Threading.Tasks.Task>)";
 
         /// <summary>
         /// Each blocking wait the guard has a sliced stand-in for (<c>Type.Method(parameter types)</c> → guard method): the
         /// stand-in takes the receiver first, then the same parameters.
         /// </summary>
         static readonly Dictionary<string, string> WaitTargets = BuildWaitTargets();
+
+        /// <summary>The method names of <see cref="WaitTargets"/>, and <c>GetResult</c> (<c>x.GetAwaiter().GetResult()</c>).</summary>
+        static readonly HashSet<string> WaitNames = new HashSet<string>(
+            WaitTargets.Keys.Select(k => k.Substring(0, k.IndexOf('(')).Substring(k.LastIndexOf('.', k.IndexOf('(')) + 1)).Concat(new[] { "GetResult" }));
 
         static Dictionary<string, string> BuildWaitTargets()
         {
@@ -254,8 +258,8 @@ namespace com.IvanMurzak.CodeExec.Roslyn
             Add("System.Threading.Tasks.Task", "Wait", "TaskWait", none, new[] { Ms }, new[] { Span }, new[] { Token }, new[] { Ms, Token });
             Add("System.Threading.Tasks.Task", "WaitAll", "TaskWaitAll", new[] { TaskArray }, new[] { TaskArray, Ms }, new[] { TaskArray, Span },
                 new[] { TaskArray, Token }, new[] { TaskArray, Ms, Token },
-                new[] { "System.Collections.Generic.IEnumerable<System.Threading.Tasks.Task>" },
-                new[] { "System.ReadOnlySpan<System.Threading.Tasks.Task>" }); // .NET 9+ `params ReadOnlySpan<Task>`: see Wait
+                new[] { "System.Collections.Generic.IEnumerable<System.Threading.Tasks.Task>" });
+            targets[WaitAllSpan] = "TaskWaitAll";
             Add("System.Threading.Tasks.Task", "WaitAny", "TaskWaitAny", new[] { TaskArray }, new[] { TaskArray, Ms }, new[] { TaskArray, Span },
                 new[] { TaskArray, Token }, new[] { TaskArray, Ms, Token });
             foreach (var pair in new[] { new[] { "SemaphoreSlim", "SemaphoreWait" }, new[] { "ManualResetEventSlim", "EventWait" }, new[] { "CountdownEvent", "CountdownWait" } })
@@ -279,9 +283,8 @@ namespace com.IvanMurzak.CodeExec.Roslyn
         /// </summary>
         static void Wait(InvocationExpressionSyntax call, Semantics semantics, List<Edit> edits)
         {
-            if (semantics.HasErrors || !(semantics.Model.GetSymbolInfo(call).Symbol is IMethodSymbol method)
-                || call.ArgumentList.Arguments.Any(a => a.NameColon != null || !a.RefKindKeyword.IsKind(SyntaxKind.None))
-                || InExpressionTree(call, semantics))
+            if (call.ArgumentList.Arguments.Any(a => a.NameColon != null || !a.RefKindKeyword.IsKind(SyntaxKind.None))
+                || semantics.HasErrors || !(semantics.Model.GetSymbolInfo(call).Symbol is IMethodSymbol method) || InExpressionTree(call, semantics))
                 return;
             if (method.Name == "GetResult")
             {
@@ -297,7 +300,7 @@ namespace com.IvanMurzak.CodeExec.Roslyn
             if (!WaitTargets.TryGetValue(signature, out var guard))
                 return;
             var arguments = call.ArgumentList.Arguments;
-            if (signature.IndexOf("ReadOnlySpan", System.StringComparison.Ordinal) >= 0
+            if (signature == WaitAllSpan
                 && arguments.Any(a => !IsTask(semantics.Model.GetTypeInfo(a.Expression).Type)))
                 return; // only the expanded form (`WaitAll(a, b)`): its tasks bind to the stand-in's `params Task[]`
             var target = ExecutionGuard.QualifiedName + "." + guard;

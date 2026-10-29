@@ -217,7 +217,7 @@ def _execute(result, logs, code, include, include_root, imports, include_outside
     except BaseException as error:  # SystemExit, KeyboardInterrupt, ...: a snippet must never take the host down
         _make_room(saved)
         watchdog.stop()
-        if isinstance(error, SnippetThreadStopped) and threads.stop_type is not None and threads.stopping:
+        if isinstance(error, SnippetThreadStopped) and threads.stopping:
             # A thread stopped at the deadline handed its stop on (Future.result): the run ran out of time.
             error = threads.stop_type().with_traceback(error.__traceback__)
         result["errorKind"] = "Timeout" if isinstance(error, SnippetTimeout) else "Runtime"
@@ -312,7 +312,8 @@ class _Watchdog:
                 if now < deadline:
                     _sleep(min(_POLL_SECONDS, deadline - now))
                 elif self._armed:
-                    first, self._fired = not self._fired, True
+                    first = not self._fired
+                    self._fired = True
                     if not self._threads.main_waiting:
                         _async_exc(self._thread_id, stop)
                     if first:
@@ -403,14 +404,14 @@ def _long(timeout):
 
 
 def _sliced(timeout, wait):
-    """A blocking wait of a snippet's thread (``wait(seconds)`` returns whether it is over), in slices of at most
-    ``_SLICE_SECONDS``: between two slices the thread is stopped when its run is (:meth:`_SnippetThreads.check`), so a
-    wait that never ends cannot outlast the time budget. Returns what the last slice returned, or ``None`` when the
-    thread belongs to no run (the caller then waits as Python does)."""
+    """A blocking wait (``wait(seconds)`` returns whether it is over; ``None`` = no bound). On a snippet's thread, a long
+    one waits in slices of at most ``_SLICE_SECONDS``: between two the thread is stopped when its run is
+    (:meth:`_SnippetThreads.check`), so a wait that never ends cannot outlast the time budget. Any other wait is Python's
+    own. Returns what the last slice returned."""
     ident = threading.get_ident()
-    run = _thread_run.get(ident)
-    if run is None:
-        return None
+    run = _thread_run.get(ident) if _thread_run else None
+    if run is None or not _long(timeout) or not run.may_stop(ident):
+        return wait(timeout)
     end = None if timeout is None else _monotonic() + timeout
     while True:
         left = _SLICE_SECONDS if end is None else max(0.0, min(_SLICE_SECONDS, end - _monotonic()))
@@ -424,25 +425,21 @@ def _sliced(timeout, wait):
 
 def _sliced_sleep(seconds):
     """``time.sleep`` while snippets run (spec section 4)."""
-    if not (_thread_run and _long(seconds) and seconds is not None):
-        return _original("sleep")(seconds)
     sleep = _original("sleep")
-    if _sliced(seconds, lambda left: sleep(left) or False) is None:
-        sleep(seconds)
+    if seconds is None:  # Python's own TypeError, not a wait without bound
+        return sleep(seconds)
+    _sliced(seconds, lambda left: sleep(left) or False)
 
 
 def _sliced_join(thread, timeout=None):
     """``threading.Thread.join`` while snippets run (spec section 4)."""
     join = _original("join")
-    if not (_thread_run and _long(timeout)):
-        return join(thread, timeout)
 
     def once(left):
         join(thread, left)  # raises as Python's own does: not started, the current thread
         return not _is_alive(thread)
 
-    if _sliced(timeout, once) is None:
-        join(thread, timeout)
+    _sliced(timeout, once)
 
 
 def _sliced_wait(condition, timeout=None):
@@ -450,10 +447,7 @@ def _sliced_wait(condition, timeout=None):
     ``queue.Queue.get``, ``concurrent.futures.Future.result`` and ``Barrier.wait`` wait through it. Waiting again after
     a slice misses no ``notify``: the condition's lock is held between two slices."""
     wait = _original("wait")
-    if not (_thread_run and _long(timeout)):
-        return wait(condition, timeout)
-    done = _sliced(timeout, lambda left: wait(condition, left))
-    return wait(condition, timeout) if done is None else done
+    return _sliced(timeout, lambda left: wait(condition, left))
 
 
 _PATCHES = {
@@ -548,14 +542,18 @@ class _SnippetThreads:
     def stops(self, ident):
         """Whether thread ``ident`` (one the run started) is to stop: the run is stopping and the agent's code is on the
         calling thread's stack."""
-        if not self.stopping or ident == self.main_ident:
-            return False
-        frame = sys._getframe(1)
-        while frame is not None:
-            if self._is_agent_file(frame.f_code.co_filename):
-                return True
+        return self.stopping and ident != self.main_ident and self._agent_frame(sys._getframe(1)) is not None
+
+    def may_stop(self, ident):
+        """Whether a wait of thread ``ident`` may ever have to stop: a thread the run (or an outer run) started, or the
+        snippet's thread of a run with a time budget. Others are not worth slicing."""
+        return any(run.main_ident != ident or run.stop_type is not None for run in self._chain(ident))
+
+    def _agent_frame(self, frame):
+        """The innermost frame of the agent's code from ``frame`` outwards, or None."""
+        while frame is not None and not self._is_agent_file(frame.f_code.co_filename):
             frame = frame.f_back
-        return False
+        return frame
 
     def start_tracked(self, thread, args, kwargs):
         start = _original("start")
@@ -643,14 +641,12 @@ class _SnippetThreads:
                 watching = True
                 continue
             thread = entry.thread
-            top = frame = frames.get(thread.ident)
-            while frame is not None and not self._is_agent_file(frame.f_code.co_filename):
-                frame = frame.f_back
-            if frame is None or not _is_alive(thread):
-                if self.ended:  # ended, never started, or none of the agent's code left on its stack
-                    entry.dismissed = True
-                else:
-                    watching = True  # between two tasks, or not running the agent's code yet: look again
+            top = frames.get(thread.ident)
+            if self._agent_frame(top) is None or not _is_alive(thread):
+                # Ended, never started, or none of the agent's code left on its stack: once the run has ended, for good.
+                # Before (at the deadline) it may be between two tasks or not run the agent's code yet: look again.
+                entry.dismissed = self.ended
+                watching = watching or not self.ended
                 continue
             watching = True
             if self._is_agent_file(top.f_code.co_filename) and not entry.done:
