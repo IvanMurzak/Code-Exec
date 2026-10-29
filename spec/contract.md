@@ -147,8 +147,28 @@ the host turns them off (`CodeRunnerOptions.ExecutionGuards`):
 - **Time.** Every loop iteration (`while`, `do`, `for`, `foreach`) and every `goto` counts down and, every few
   iterations, reads the clock (every iteration while iterations are slow); so do the calls above. Once `timeoutMs` is
   spent, the run stops with `Timeout`: `System.TimeoutException: The snippet ran longer than its time budget of N ms
-  (timeoutMs) and was stopped.`, with the frame where it was (`snippet.cs:line N`). Code that blocks inside a host or
-  framework call (`Thread.Sleep`, a lock, an engine call that never returns) is stopped only when the call returns.
+  (timeoutMs) and was stopped.`, with the frame where it was (`snippet.cs:line N`). The work the snippet started
+  (below) shares the budget: at the deadline it stops at its next check too, so a snippet waiting for it gets it back.
+- **Blocking waits.** A blocking wait written in the agent's code waits in slices of at most 50 ms with a check between
+  two, so it stops at the budget (and in work of an ended run) even when nothing would ever end it: `Thread.Join`,
+  `Thread.Sleep`, `Task.Wait` / `Task.WaitAll` / `Task.WaitAny`, `Task<T>.Result`, `task.GetAwaiter().GetResult()`,
+  `SemaphoreSlim.Wait`, `ManualResetEventSlim.Wait`, `CountdownEvent.Wait`, `Monitor.Wait`, `WaitHandle.WaitOne` /
+  `WaitAll` / `WaitAny`, in their forms without a timeout and with one (`int`, `TimeSpan`, with or without a
+  `CancellationToken`; .NET 9+ `Task.WaitAll(IEnumerable<Task>)`), and `task.ConfigureAwait(b).GetAwaiter().GetResult()`.
+  Each becomes the guard's stand-in of the same parameters; values, exceptions, timeouts and wake-ups stay the same, a
+  wait that succeeded is never followed by a stop (it may have acquired a semaphore or a mutex), and a wait of at most
+  50 ms is the framework's own, as is a wait without bound where nothing could stop it (a run without budget, not work
+  of a run). One difference: under a budget, a wait without bound for a task does not run the task inline on the
+  waiting thread when it is still queued (a task only its scheduler's inline path can run, such as a
+  synchronization-context scheduler waited on from its own thread, then waits until the budget). Not covered (stopped
+  only when the call returns): such a wait with named arguments, inside a conditional access (`a?.Task.Result`), as a
+  property pattern path (`x is { Task.Result: 1 }`), through `base.`, a method group or a delegate; .NET 9+
+  `Task.WaitAll` given a span; `lock` / `Monitor.Enter` and other waits (`BlockingCollection.Take`, `Barrier`,
+  `SpinWait`, `Process.WaitForExit`, I/O); and every wait inside host, engine or framework code the snippet calls (an
+  engine call that never returns). A native thread cannot be stopped at all. A synchronous run that returns only after
+  its budget (blocked in such a call) is no success either: `Timeout`, `System.TimeoutException: The snippet ran longer
+  than its time budget of N ms (timeoutMs): it finished only after M ms, blocked in a call the guards cannot interrupt
+  (a lock, a host or engine call).`, and its value is dropped.
 - **Once stopped**, every further check throws again, and the agent's `catch` clauses that could catch the stop (no
   type, `Exception`, `SystemException` or the stop's own type) get a filter that lets it pass, so it reaches the runtime;
   `finally` blocks still run. That filter makes a few invalid programs compile (a later `catch` that an earlier
@@ -166,8 +186,8 @@ the host turns them off (`CodeRunnerOptions.ExecutionGuards`):
   snippet started had not finished when it ended: they are stopped at their next loop iteration or call. Join or await
   work the snippet starts.` (work created but never started counts too). Not covered, so it may outlive the run: timers
   (`System.Threading.Timer`, `System.Timers.Timer`, engine timers) and other callbacks; an `async void` delegate's code
-  after its first `await` (`new Thread(async () => ...)`); work blocked in a wait or a host call (it stops once that
-  returns); threads started by native code or by host code the snippet calls; a start written through an alias of
+  after its first `await` (`new Thread(async () => ...)`); work blocked in a wait the guards do not slice or in a host
+  call (it stops once that returns); threads started by native code or by host code the snippet calls; a start written through an alias of
   `Thread` / `Task`, inside a query expression, or whose delegate type cannot be named (an anonymous type); a delegate
   stored first and started later through another API; and work that a callback left behind starts after the run (it
   is the callback's own). Caveat: a timer or other callback created inside asynchronous task work inherits the run
@@ -199,21 +219,40 @@ the host turns them off (`CodeRunnerOptions.ExecutionGuards`):
 - **Time budget.** When `timeoutMs` is spent, a watchdog thread raises `SnippetTimeout` (a `BaseException`) in the
   snippet's thread, and again every 100 ms while the snippet catches it: `Timeout`, `SnippetTimeout: The snippet ran
   longer than its time budget of N ms (timeoutMs) and was stopped.` plus the snippet's frames. Python delivers it
-  between bytecodes: pure Python loops stop; a call into C (`time.sleep`, an engine call) finishes first, and a snippet
-  that catches `BaseException` in its loop is not stopped. Python 3.10 never delivers it, nor releases the GIL, in a loop
-  whose body begins with `try` or `with` (`while True: try: ...`): such a run hangs the interpreter there (3.11+ stop
-  it). It needs `ctypes` (`PyThreadState_SetAsyncExc`); without it
-  the budget is not enforced. The stop is disarmed before the runner returns: none reaches the host afterwards.
+  between bytecodes: pure Python loops stop; a call into C (an engine call) finishes first, and a snippet that catches
+  `BaseException` in its loop is not stopped. Python 3.10 never delivers it, nor releases the GIL, in a loop whose body
+  begins with `try` or `with` (`while True: try: ...`): such a run hangs the interpreter there (3.11+ stop it). At the
+  deadline the threads the snippet started are stopped too (see Threads), so a snippet waiting for one of them
+  (`join`, `Future.result`) gets it back; a `SnippetThreadStopped` that reaches the snippet that way (`Future.result`
+  of stopped work) is reported as the `Timeout`. It needs `ctypes` (`PyThreadState_SetAsyncExc`); without it the budget
+  is not enforced. The stop is disarmed before the runner returns (the host's value converter runs unbudgeted): none
+  reaches the host afterwards.
+- **Blocking waits.** While a snippet runs, `threading.Thread.join`, `threading.Condition.wait` (and so `Event.wait`,
+  `Semaphore.acquire`, `Barrier.wait`, `queue.Queue.get` / `put`, `concurrent.futures.Future.result`, pool shutdown)
+  and `time.sleep` are replaced: called from a thread the snippet started, or from the snippet's thread when the run
+  has a budget, a finite wait longer than 50 ms (or one without bound) waits in slices of at most 50 ms. Between two,
+  the snippet's thread raises its `SnippetTimeout` once the deadline has passed (the watchdog sends no asynchronous
+  stop into a sliced wait), and a thread the snippet started raises `SnippetThreadStopped` once the run is stopping
+  while the agent's code is on its stack; a `Condition.wait` raises it only once it holds its lock again, as after any
+  wait. So `time.sleep(60)` with a 1 s budget stops after about 1 s. Values, timeouts and wake-ups stay as Python's own:
+  a sliced `Condition.wait` keeps ONE waiter for the whole wait (only the waiter lock is acquired in slices), so no
+  `notify` is lost between two slices. Host threads wait as before; the originals are restored when no snippet runs (a
+  host that replaced one meanwhile keeps the stand-in in its chain, which then waits as Python does outside runs). Not
+  covered (stopped only when the call returns): `Lock.acquire` / `RLock.acquire` (C), `queue.SimpleQueue.get`,
+  `select` / sockets / `subprocess` waits, `asyncio`'s event loop waiting for I/O, waits inside C extensions or the
+  engine, and `from time import sleep` bound before the run. A run whose deadline passed while it still ran (blocked
+  in such a call) is a `Timeout` even when it then returns without the stop reaching it.
 - **Threads.** Threads the snippet starts (`threading.Thread.start`, `threading.Timer` included, called from the
   snippet's thread or from one of those threads while it runs) may not outlive it. When it ends (finished or timed
   out), a `threading.Timer` that has not fired is cancelled, and every other such thread still alive gets
   `code_exec.SnippetThreadStopped` (a `BaseException`, the same mechanism as the time budget) whenever the snippet's or
-  an include's code is what it runs, checked every 100 ms while such code is on its stack. The thread ends quietly
+  an include's code is what it runs, checked every 100 ms while such code is on its stack; this starts already at the
+  deadline of a run that times out. One inside a sliced wait (above) raises it there itself. The thread ends quietly
   (nothing is printed). One `warning` log entry counts the threads still running (cancelled timers aside): `N thread(s)
   the snippet started were still running when it ended: each is stopped while it runs the snippet's code. Join threads
-  before the snippet returns.` A thread inside library or host code (`queue.get`) gets no stop until it returns to the
-  snippet's code; one with none of it left on its stack (a `concurrent.futures` worker waiting for work) is left alone
-  from then on; one that catches `BaseException` every time is not stopped. `threading.Thread.start` is replaced only
+  before the snippet returns.` A thread inside library or host code gets no stop until it returns to the snippet's code
+  or reaches a sliced wait with that code on its stack; one with none of it left on its stack (a `concurrent.futures`
+  worker waiting for work, a thread whose target is `event.wait` itself) is left alone once the run has ended; one that catches `BaseException` every time is not stopped. `threading.Thread.start` is replaced only
   while a snippet runs. Not covered: `_thread.start_new_thread`, threads started by C code, and threads started by the
   snippet's threads after it has ended. Threads that host code starts while the snippet calls it count as the
   snippet's. Needs `ctypes`, like the time budget.
@@ -266,7 +305,10 @@ Lengths are in characters: UTF-16 code units in C#, code points in Python. A lim
   guarded too (§3.6). Python < 3.12: a snippet's `sys.setrecursionlimit` is capped (default 3000) with a warning (§4).
   Threads and tasks a snippet starts stop when its run ends, with a `warning` when some had not finished (C# §3.6,
   Python §4). Hosts can cap `timeoutMs` (§1). C#: a using declaration (`using var x = ...;`) is a statement also as the
-  first line, and `global using` goes before the runtime's usings (§3.1).
+  first line, and `global using` goes before the runtime's usings (§3.1). A snippet blocked in a wait that never ends
+  (a join on a thread that never ends, `Future.result`, `Event.wait`, `SemaphoreSlim.Wait`, `Task.Result`, a long
+  sleep) stops at its budget instead of hanging the host: blocking waits are sliced (C# §3.6, Python §4), and Python
+  stops the snippet's threads already at the deadline.
 
 - **v0.3.1** — C#: `static readonly` fields of immutable types are not static state (§3.5). Python is unchanged.
 - **v0.3** — output limits (§6): request fields `maxValueChars`, `maxLogChars`, `maxLogLineChars`, `maxErrorChars`

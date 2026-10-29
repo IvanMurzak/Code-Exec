@@ -307,6 +307,106 @@ namespace CodeExecTests
             Assert.True(errorKind == kind, errorKind + ": " + error);
         }
 
+        // A blocking wait the agent's code writes waits in slices with a guard check between two (spec §3.6): one that never
+        // ends stops at the budget, and the process stays usable. In a child process: unguarded, each of these hangs it.
+        [Theory]
+        [InlineData("var t = new System.Threading.Thread(() => { while (true) { } });\nt.Start();\nt.Join();")]
+        [InlineData("Task.Run(() => { while (true) { } }).Wait();")]
+        [InlineData("return Task.Run(() => { while (true) { } return 1; }).Result;")]
+        [InlineData("Task.WaitAll(Task.Run(() => { while (true) { } }));")]
+        [InlineData("new System.Threading.SemaphoreSlim(0).Wait();")]
+        [InlineData("new System.Threading.ManualResetEventSlim().Wait();")]
+        [InlineData("new System.Threading.CountdownEvent(1).Wait(System.Threading.CancellationToken.None);")]
+        [InlineData("var o = new object();\nlock (o) System.Threading.Monitor.Wait(o);")]
+        [InlineData("System.Threading.Thread.Sleep(60_000);")]
+        [InlineData("System.Threading.Thread.Sleep(System.Threading.Timeout.Infinite);")]
+        [InlineData("System.Threading.Thread.Sleep(60000);\n1")]
+        [InlineData("System.Threading.Thread.Sleep(2000);\n1")]
+        [InlineData("Task.Delay(60_000).Wait();\n1")]
+        [InlineData("new System.Threading.ManualResetEvent(false).WaitOne();")]
+        [InlineData("System.Threading.WaitHandle.WaitAny(new System.Threading.WaitHandle[] { new System.Threading.ManualResetEvent(false) });")]
+        [InlineData("new TaskCompletionSource<int>().Task.Wait(60_000);")]
+        [InlineData("return new TaskCompletionSource<int>().Task.Result;")]
+        [InlineData("return new TaskCompletionSource<int>().Task.GetAwaiter().GetResult();")]
+        [InlineData("var a = new TaskCompletionSource<int>().Task;\nTask.WaitAll(a, a);")]
+        [InlineData("Task.WaitAny(new TaskCompletionSource<int>().Task);")]
+        [InlineData("System.Threading.Thread.CurrentThread.Join();")]
+        // Work the snippet waits for that is itself blocked in a wait: it stops in its wait too.
+        [InlineData("var e = new System.Threading.ManualResetEventSlim();\nvar t = new System.Threading.Thread(() => e.Wait());\nt.Start();\nt.Join();")]
+        [InlineData("var e = new System.Threading.ManualResetEventSlim();\nTask.Run(() => e.Wait()).Wait();")]
+        public void BlockingWaitsStopAtTheBudget(string code)
+        {
+            var run = ChildProcess.Run(code, timeoutMs: 1000, lingerMs: 300);
+            Assert.True(run.ErrorKind == nameof(ErrorKind.Timeout), run.ErrorKind + ": " + run.Error);
+            Assert.StartsWith("System.TimeoutException: The snippet ran longer than its time budget of 1000 ms (timeoutMs)", run.Error);
+            Assert.DoesNotContain("finished only after", run.Error); // stopped in the wait, not reported after it returned
+            Assert.True(run.ExecuteMs < 2500, $"stopped after {run.ExecuteMs} ms");
+            Assert.Equal("3", run.After);
+        }
+
+        // Waits the rewrite cannot reach into stay as written: they must still compile and mean what they meant.
+        [Theory]
+        [InlineData("var tcs = new TaskCompletionSource<int>();\ntcs.SetResult(3);\nTaskCompletionSource<int> n = tcs;\nreturn n?.Task.Result;", "3", 0)]
+        [InlineData("var tcs = new TaskCompletionSource<int>();\ntcs.SetResult(3);\nTaskCompletionSource<int> n = tcs;\nn?.Task.Wait();\nreturn n?.Task.GetAwaiter().GetResult();", "3", 0)]
+        [InlineData("var tasks = new[] { Task.FromResult(4) };\nreturn tasks?[0].Result;", "4", 0)]
+        [InlineData("var tcs = new TaskCompletionSource<int>();\ntcs.SetResult(3);\nreturn tcs is { Task.Result: 3 };", "True", 4)] // C# 10
+        public void WaitsTheRewriteSkipsStillCompile(string code, string expected, int minRoslyn)
+        {
+            if (typeof(Microsoft.CodeAnalysis.CSharp.CSharpCompilation).Assembly.GetName().Version!.Major < minRoslyn)
+                return;
+            var result = Fixtures.Runner().Execute(new ExecuteRequest { Code = code });
+            Assert.True(result.Success, result.Error + " " + string.Join(" | ", result.Diagnostics));
+            Assert.Equal(expected, result.Value);
+        }
+
+        [Fact]
+        public void ConfigureAwaitGetResultIsSliced()
+        {
+            var run = ChildProcess.Run("return new TaskCompletionSource<int>().Task.ConfigureAwait(false).GetAwaiter().GetResult();", timeoutMs: 300);
+            Assert.True(run.ErrorKind == nameof(ErrorKind.Timeout), run.ErrorKind + ": " + run.Error);
+        }
+
+        // .NET 9+ Task.WaitAll(IEnumerable<Task>, CancellationToken = default). In a child process: unguarded, it hangs.
+        [Fact]
+        public void WaitAllOfAnEnumerableIsSliced()
+        {
+            if (typeof(Task).GetMethod("WaitAll", new[] { typeof(System.Collections.Generic.IEnumerable<Task>), typeof(System.Threading.CancellationToken) }) == null)
+                return;
+            var run = ChildProcess.Run("Task.WaitAll(new List<Task> { new TaskCompletionSource<int>().Task });", timeoutMs: 1000);
+            Assert.True(run.ErrorKind == nameof(ErrorKind.Timeout), run.ErrorKind + ": " + run.Error);
+            Assert.Equal("3", run.After);
+        }
+
+        // Where nothing could stop it (no budget, not work of a run), a wait without bound is the framework's own: it still
+        // runs a queued task inline, which a scheduler that only runs tasks inline needs.
+        [Fact]
+        public void AnUnboundedRunKeepsInlineTaskExecution()
+        {
+            const string code = "var t = Task.Factory.StartNew(() => 1, System.Threading.CancellationToken.None, TaskCreationOptions.None, new S());\nreturn t.Result;\n"
+                + "class S : TaskScheduler { protected override IEnumerable<Task> GetScheduledTasks() => null; protected override void QueueTask(Task t) { } protected override bool TryExecuteTaskInline(Task t, bool q) => TryExecuteTask(t); }";
+            var result = Fixtures.Runner(configure: o => o.DefaultTimeoutMs = 0).Execute(new ExecuteRequest { Code = code });
+            Assert.True(result.Success, result.Error);
+            Assert.Equal("1", result.Value);
+        }
+
+        // A wait the guards cannot slice (here a named argument) that returns past the budget: the run is no success.
+        [Fact]
+        public void ARunThatOutranItsBudgetInAnUnslicedCallIsATimeout()
+        {
+            var result = Fixtures.Runner().Execute(new ExecuteRequest { Code = "System.Threading.Thread.Sleep(millisecondsTimeout: 600);\n1", TimeoutMs = 200 });
+            Assert.Equal(ErrorKind.Timeout, result.ErrorKind);
+            Assert.StartsWith("System.TimeoutException: The snippet ran longer than its time budget of 200 ms (timeoutMs): it finished only after", result.Error);
+        }
+
+        [Fact]
+        public void ATimedOutWaitShowsTheAgentsLine()
+        {
+            var result = Fixtures.Runner().Execute(new ExecuteRequest { Code = "var s = new System.Threading.SemaphoreSlim(0);\ns\n    .Wait();", TimeoutMs = 200 });
+            Assert.Equal(ErrorKind.Timeout, result.ErrorKind);
+            Assert.Contains("snippet.cs:line 2", result.Error);
+            Assert.DoesNotContain(ExecutionGuard.TypeName, result.Error);
+        }
+
         [Fact]
         public void WorkACallbackStartsAfterTheRunIsItsOwn()
         {
@@ -374,6 +474,23 @@ namespace CodeExecTests
         [InlineData("Func<int> f = null;\ntry { Task.Run(f); } catch (ArgumentNullException) { return 13; }\nreturn 0;", "13")]
         [InlineData("try { Task.Run(() => { throw new InvalidOperationException(\"w\"); }).Wait(); } catch (AggregateException e) { return e.InnerException!.Message; }\nreturn \"\";", "w")]
         [InlineData("System.Linq.Expressions.Expression<Func<Task<int>>> e = () => Task.Run(() => 1);\ne.Body.ToString().Contains(\"Worker\")", "False")]
+        // Blocking waits become sliced stand-ins: the same values, timeouts, exceptions and wake-ups.
+        [InlineData("var t = new System.Threading.Thread(() => System.Threading.Thread.Sleep(150));\nt.Start();\n$\"{t.Join(10)} {t.Join(5000)} {t.Join(TimeSpan.FromSeconds(1))}\"", "False True True")]
+        [InlineData("var s = new System.Threading.SemaphoreSlim(1);\n$\"{s.Wait(10)} {s.Wait(120)} {s.Wait(TimeSpan.FromMilliseconds(80), System.Threading.CancellationToken.None)}\"", "True False False")]
+        [InlineData("var s = new System.Threading.SemaphoreSlim(0);\ns.Wait(millisecondsTimeout: 100)", "False")]
+        [InlineData("var w = System.Diagnostics.Stopwatch.StartNew();\nSystem.Threading.Thread.Sleep(300);\nSystem.Threading.Thread.Sleep(TimeSpan.FromMilliseconds(100));\nw.ElapsedMilliseconds >= 360", "True")]
+        [InlineData("Task.WaitAny(Task.Delay(10_000), Task.FromResult(1))", "1")]
+        [InlineData("Task.WaitAny(new[] { Task.Delay(10_000) }, 120)", "-1")]
+        [InlineData("Task.WaitAll(new[] { Task.Delay(10_000) }, 120)", "False")]
+        [InlineData("System.Threading.WaitHandle.WaitAny(new System.Threading.WaitHandle[] { new System.Threading.ManualResetEvent(false) }, 120)", "258")]
+        [InlineData("var o = new object();\nvar t = new System.Threading.Thread(() => { System.Threading.Thread.Sleep(200); lock (o) System.Threading.Monitor.Pulse(o); });\nbool got;\nlock (o) { t.Start(); got = System.Threading.Monitor.Wait(o); }\nt.Join();\ngot", "True")]
+        [InlineData("var e = new System.Threading.ManualResetEventSlim();\nTask.Run(() => { System.Threading.Thread.Sleep(150); e.Set(); });\ne.Wait();\ne.IsSet", "True")]
+        [InlineData("Task.Run(async () => { await Task.Delay(150); return 4; }).GetAwaiter().GetResult()", "4")]
+        [InlineData("try { Task.Run(() => { System.Threading.Thread.Sleep(100); throw new InvalidOperationException(\"r\"); return 1; }).GetAwaiter().GetResult(); } catch (InvalidOperationException e) { return e.Message; }\nreturn \"\";", "r")]
+        [InlineData("try { return Task.Run(() => { System.Threading.Thread.Sleep(100); throw new InvalidOperationException(\"q\"); return 1; }).Result.ToString(); } catch (AggregateException e) { return e.InnerException!.Message; }", "q")]
+        [InlineData("var cts = new System.Threading.CancellationTokenSource(150);\ntry { new System.Threading.SemaphoreSlim(0).Wait(cts.Token); } catch (OperationCanceledException) { return \"canceled\"; }\nreturn \"\";", "canceled")]
+        [InlineData("var t = Task.FromResult(1);\nnameof(t.Result)", "Result")]
+        [InlineData("System.Linq.Expressions.Expression<Func<bool>> e = () => new System.Threading.SemaphoreSlim(1).Wait(10);\ne.Body.ToString().Contains(\"SemaphoreWait\")", "False")]
         public async Task GuardedCodeKeepsItsMeaning(string code, string expected)
         {
             var result = await Fixtures.Runner().ExecuteAsync(new ExecuteRequest { Code = code });
