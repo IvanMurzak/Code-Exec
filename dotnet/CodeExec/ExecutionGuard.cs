@@ -80,7 +80,7 @@ namespace com.IvanMurzak.CodeExec
 internal static class __CodeExecGuard
 {
     public static int Calls, Jumps;
-    static int _start, _last, _interval, _budget, _stopped, _maxStack, _baseThread, _orphans;
+    static int _start, _last, _interval, _budget, _stopped, _maxStack, _baseThread, _orphans, _asyncWork, _live;
     static long _base;
     static Run _current;
     // The run of the work running: synchronous work on this thread, and asynchronous task work (it flows into the work's
@@ -127,9 +127,10 @@ internal static class __CodeExecGuard
         return true;
     }
 
-    public static bool Running() => _stopped == 0 && (_orphans == 0 || !Orphaned());
+    public static bool Running() => _stopped == 0 && (_orphans == 0 || _live == 0 || !Orphaned());
 
-    static Run Current() => _thread ?? _async.Value;
+    // The AsyncLocal is slow to read: only once asynchronous task work has ever run.
+    static Run Current() => _thread ?? (_asyncWork != 0 ? _async.Value : null);
 
     static bool Orphaned()
     {
@@ -156,7 +157,14 @@ internal static class __CodeExecGuard
         return run;
     }
 
-    static void Done(Run run) => global::System.Threading.Interlocked.Decrement(ref run.Pending);
+    /// <summary>Work of a run starts: while none runs (<c>_live</c>), no check needs to look whose work it is.</summary>
+    static void Started() => global::System.Threading.Interlocked.Increment(ref _live);
+
+    static void Done(Run run)
+    {
+        global::System.Threading.Interlocked.Decrement(ref _live);
+        global::System.Threading.Interlocked.Decrement(ref run.Pending);
+    }
 
     /// <summary>
     /// Synchronous work of a run. A thread entry (swallow) swallows a stop: unhandled on a thread, it
@@ -164,8 +172,9 @@ internal static class __CodeExecGuard
     /// </summary>
     static void Do(Run run, global::System.Action work, bool swallow)
     {
+        Started();
         var thread = _thread;
-        var flowing = _async.Value;
+        var flowing = _asyncWork != 0 ? _async.Value : null;
         _thread = run;
         if (flowing != null)
             _async.Value = null; // what the work starts without a wrapper (a timer, an async void continuation) is not the run's
@@ -189,6 +198,8 @@ internal static class __CodeExecGuard
             Do(run, () => value = work(), false);
             return value;
         }
+        _asyncWork = 1;
+        Started();
         var thread = _thread;
         var flowing = _async.Value;
         _thread = null;
@@ -276,7 +287,7 @@ internal static class __CodeExecGuard
     {
         if (_stopped == 0)
         {
-            if (_orphans != 0 && Orphaned())
+            if (_orphans != 0 && _live != 0 && Orphaned())
                 throw new global::System.TimeoutException(""The snippet's run has ended, so this thread or task it started was stopped: work a snippet starts must finish (join or await it) before the snippet returns."");
             if (_budget <= 0 || unchecked(global::System.Environment.TickCount - _start) < _budget)
                 return;
