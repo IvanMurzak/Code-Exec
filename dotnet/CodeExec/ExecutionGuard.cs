@@ -352,7 +352,7 @@ internal static class __CodeExecGuard
 
     static void Inline(global::System.Threading.Tasks.Task task)
     {
-        if (task == null || task.Status != global::System.Threading.Tasks.TaskStatus.WaitingToRun || _tryRunInline == null || _tryRunInline.ReturnType != typeof(bool))
+        if (task == null || task.Status != global::System.Threading.Tasks.TaskStatus.WaitingToRun || _tryRunInline == null)
             return;
         try { _tryRunInline.Invoke(task, null); }
         catch (global::System.Reflection.TargetInvocationException e) when (e.InnerException != null)
