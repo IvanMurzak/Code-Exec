@@ -389,6 +389,85 @@ namespace CodeExecTests
             Assert.Equal("1", result.Value);
         }
 
+        // Under a budget, a wait without bound still runs a queued task inline when its scheduler lets the waiting thread
+        // (as the framework's wait does): a task queued to the host's main-thread synchronization context, waited on from
+        // that thread, would otherwise wait until the budget (Godot: GodotSynchronizationContext).
+        [Theory]
+        [InlineData("return Task.Factory.StartNew(() => 13, System.Threading.CancellationToken.None, TaskCreationOptions.None, TaskScheduler.FromCurrentSynchronizationContext()).Result;")]
+        [InlineData("return Task.Factory.StartNew(() => 13, System.Threading.CancellationToken.None, TaskCreationOptions.None, TaskScheduler.FromCurrentSynchronizationContext()).GetAwaiter().GetResult();")]
+        [InlineData("var t = Task.Factory.StartNew(() => 13, System.Threading.CancellationToken.None, TaskCreationOptions.None, TaskScheduler.FromCurrentSynchronizationContext());\nt.Wait();\nreturn t.Result;")]
+        [InlineData("var t = Task.Factory.StartNew(() => 13, System.Threading.CancellationToken.None, TaskCreationOptions.None, TaskScheduler.FromCurrentSynchronizationContext());\nTask.WaitAll(t);\nreturn t.Result;")]
+        [InlineData("var t = new Task<int>(() => 13);\nt.Start(TaskScheduler.FromCurrentSynchronizationContext());\nreturn t.Result;")]
+        public void ATaskQueuedToTheWaitingThreadsContextRunsInline(string code)
+        {
+            var (result, ms) = OnSingleThreadedContext(code, timeoutMs: 5000);
+            Assert.True(result.Success, result.ErrorKind + ": " + result.Error);
+            Assert.Equal("13", result.Value);
+            Assert.True(ms < 2500, $"took {ms} ms");
+        }
+
+        // What no thread may run inline stays a sliced wait that stops at the budget instead of hanging the context's thread:
+        // an async method's continuation queued to the blocked context, or the context's task waited on by the snippet's work.
+        [Theory]
+        [InlineData("async Task<int> F() { await Task.Delay(20); return 5; }\nreturn F().Result;")]
+        [InlineData("async Task<int> F() { await Task.Delay(20); return 5; }\nreturn F().GetAwaiter().GetResult();")]
+        [InlineData("async Task F() { await Task.Delay(20); }\nF().Wait();")]
+        [InlineData("async Task F() { await Task.Delay(20); }\nTask.WaitAll(F());")]
+        [InlineData("var s = TaskScheduler.FromCurrentSynchronizationContext();\nreturn Task.Run(() => Task.Factory.StartNew(() => 13, System.Threading.CancellationToken.None, TaskCreationOptions.None, s).Result).Result;")]
+        // Run inline, its endless body still stops at the budget.
+        [InlineData("return Task.Factory.StartNew(() => { while (true) { } return 1; }, System.Threading.CancellationToken.None, TaskCreationOptions.None, TaskScheduler.FromCurrentSynchronizationContext()).Result;")]
+        public void AWaitNoThreadCanEndOnTheContextStopsAtTheBudget(string code)
+        {
+            var (result, ms) = OnSingleThreadedContext(code, timeoutMs: 1000);
+            Assert.True(result.ErrorKind == ErrorKind.Timeout, result.ErrorKind + ": " + result.Error);
+            Assert.Contains("The snippet ran longer than its time budget of 1000 ms (timeoutMs)", result.Error);
+            Assert.True(ms < 2500, $"stopped after {ms} ms");
+        }
+
+        /// <summary>Runs the snippet on a thread whose synchronization context queues work to that same thread (a host's main thread).</summary>
+        static (ExecuteResult Result, long Ms) OnSingleThreadedContext(string code, int timeoutMs)
+        {
+            ExecuteResult? result = null;
+            Exception? error = null;
+            var watch = new Stopwatch();
+            var thread = new System.Threading.Thread(() =>
+            {
+                var context = new SingleThreadedContext();
+                System.Threading.SynchronizationContext.SetSynchronizationContext(context);
+                try
+                {
+                    var runner = Fixtures.Runner();
+                    watch.Start();
+                    result = runner.Execute(new ExecuteRequest { Code = code, TimeoutMs = timeoutMs });
+                    watch.Stop();
+                    context.Drain(); // what the run queued to the context runs once the thread is free again
+                }
+                catch (Exception e) { error = e; }
+            }) { IsBackground = true };
+            thread.Start();
+            Assert.True(thread.Join(60_000), "the context's thread hung");
+            Assert.Null(error);
+            return (result!, watch.ElapsedMilliseconds);
+        }
+
+        /// <summary>A host's main-thread context: posted work waits in a queue until that thread is free to run it.</summary>
+        sealed class SingleThreadedContext : System.Threading.SynchronizationContext
+        {
+            readonly System.Collections.Concurrent.ConcurrentQueue<(System.Threading.SendOrPostCallback, object?)> _queue = new();
+
+            public override void Post(System.Threading.SendOrPostCallback d, object? state) => _queue.Enqueue((d, state));
+
+            public override void Send(System.Threading.SendOrPostCallback d, object? state) => throw new NotSupportedException();
+
+            public override System.Threading.SynchronizationContext CreateCopy() => this;
+
+            public void Drain()
+            {
+                while (_queue.TryDequeue(out var item))
+                    item.Item1(item.Item2);
+            }
+        }
+
         // A wait the guards cannot slice (here a named argument) that returns past the budget: the run is no success.
         [Fact]
         public void ARunThatOutranItsBudgetInAnUnslicedCallIsATimeout()
