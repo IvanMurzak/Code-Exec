@@ -158,9 +158,13 @@ the host turns them off (`CodeRunnerOptions.ExecutionGuards`):
   Each becomes the guard's stand-in of the same parameters; values, exceptions, timeouts and wake-ups stay the same, a
   wait that succeeded is never followed by a stop (it may have acquired a semaphore or a mutex), and a wait of at most
   50 ms is the framework's own, as is a wait without bound where nothing could stop it (a run without budget, not work
-  of a run). One difference: under a budget, a wait without bound for a task does not run the task inline on the
-  waiting thread when it is still queued (a task only its scheduler's inline path can run, such as a
-  synchronization-context scheduler waited on from its own thread, then waits until the budget). Not covered (stopped
+  of a run). `Task.Wait` / `Task.WaitAll` without a timeout and without a cancelable token, `Result` and `GetResult`
+  first offer a task that is still queued to its scheduler to run inline on the waiting thread, as the framework's own
+  waits do (`WaitAny` never runs one inline): a task queued to a synchronization context and waited on from that
+  context's thread runs there and returns its value. A task the scheduler declines, one with no body to run (an async
+  method's, whose continuation waits for the blocked thread), a wait on a thread-pool thread, and every wait on a
+  runtime without the framework's inline path are waited for in slices and stop at the budget. A body run inline that
+  is not the snippet's own code is stopped only when it returns. Not covered (stopped
   only when the call returns): such a wait with named arguments, inside a conditional access (`a?.Task.Result`), as a
   property pattern path (`x is { Task.Result: 1 }`), through `base.`, a method group or a delegate; .NET 9+
   `Task.WaitAll` given a span; `lock` / `Monitor.Enter` and other waits (`BlockingCollection.Take`, `Barrier`,
