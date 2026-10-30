@@ -326,8 +326,8 @@ internal static class __CodeExecGuard
     public static bool TaskWaitAll(global::System.Threading.Tasks.Task[] tasks, int millisecondsTimeout, global::System.Threading.CancellationToken cancellationToken)
     {
         if (millisecondsTimeout == -1 && !cancellationToken.CanBeCanceled && tasks != null)
-            foreach (var task in tasks)
-                Inline(task);
+            for (var i = tasks.Length - 1; i >= 0; i--) // the framework's order
+                Inline(tasks[i]);
         return Sliced(millisecondsTimeout, ms => global::System.Threading.Tasks.Task.WaitAll(tasks, ms, cancellationToken));
     }
 
@@ -345,14 +345,25 @@ internal static class __CodeExecGuard
     // A wait without bound or token first offers a task that is still queued to its scheduler to run inline on this thread,
     // as the framework's own wait does (Task.WrappedTryRunInline): the scheduler decides whether this thread may run it (a
     // synchronization-context task waited on from that context's thread may). A task it declines (the thread pool's from
-    // another thread) or one with no body to run (an async method's) is waited for in slices. Where the runtime lacks that
-    // method, every wait is sliced.
-    static readonly global::System.Reflection.MethodInfo _tryRunInline = typeof(global::System.Threading.Tasks.Task).GetMethod(""WrappedTryRunInline"",
-        global::System.Reflection.BindingFlags.Instance | global::System.Reflection.BindingFlags.NonPublic, null, global::System.Type.EmptyTypes, null);
+    // another thread) or one with no body to run (an async method's) is waited for in slices. Not on a thread-pool thread:
+    // there the pool's scheduler could hand it any task from the thread's local queue (not necessarily the snippet's), which
+    // other pool threads run anyway. Where the runtime lacks that method, every wait is sliced.
+    static readonly global::System.Reflection.MethodInfo _tryRunInline = FindTryRunInline();
+
+    static global::System.Reflection.MethodInfo FindTryRunInline()
+    {
+        try
+        {
+            return typeof(global::System.Threading.Tasks.Task).GetMethod(""WrappedTryRunInline"",
+                global::System.Reflection.BindingFlags.Instance | global::System.Reflection.BindingFlags.NonPublic, null, global::System.Type.EmptyTypes, null);
+        }
+        catch (global::System.Exception) { return null; } // never a failing type initializer: that would break every guarded snippet
+    }
 
     static void Inline(global::System.Threading.Tasks.Task task)
     {
-        if (task == null || task.Status != global::System.Threading.Tasks.TaskStatus.WaitingToRun || _tryRunInline == null)
+        if (task == null || task.Status != global::System.Threading.Tasks.TaskStatus.WaitingToRun || _tryRunInline == null
+            || global::System.Threading.Thread.CurrentThread.IsThreadPoolThread)
             return;
         try { _tryRunInline.Invoke(task, null); }
         catch (global::System.Reflection.TargetInvocationException e) when (e.InnerException != null)

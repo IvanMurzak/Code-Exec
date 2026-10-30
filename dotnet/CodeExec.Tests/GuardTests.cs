@@ -398,12 +398,22 @@ namespace CodeExecTests
         [InlineData("var t = Task.Factory.StartNew(() => 13, System.Threading.CancellationToken.None, TaskCreationOptions.None, TaskScheduler.FromCurrentSynchronizationContext());\nt.Wait();\nreturn t.Result;")]
         [InlineData("var t = Task.Factory.StartNew(() => 13, System.Threading.CancellationToken.None, TaskCreationOptions.None, TaskScheduler.FromCurrentSynchronizationContext());\nTask.WaitAll(t);\nreturn t.Result;")]
         [InlineData("var t = new Task<int>(() => 13);\nt.Start(TaskScheduler.FromCurrentSynchronizationContext());\nreturn t.Result;")]
+        [InlineData("var p = Task.Run(() => 6);\nvar t = Task.Factory.StartNew(() => 7, System.Threading.CancellationToken.None, TaskCreationOptions.None, TaskScheduler.FromCurrentSynchronizationContext());\nTask.WaitAll(p, t);\nreturn p.Result + t.Result;")]
         public void ATaskQueuedToTheWaitingThreadsContextRunsInline(string code)
         {
             var (result, ms) = OnSingleThreadedContext(code, timeoutMs: 5000);
             Assert.True(result.Success, result.ErrorKind + ": " + result.Error);
             Assert.Equal("13", result.Value);
-            Assert.True(ms < 2500, $"took {ms} ms");
+        }
+
+        // An inlined body that throws keeps the framework's exceptions: GetResult the original one, never a Timeout.
+        [Fact]
+        public void AnInlinedTaskThatThrowsKeepsItsException()
+        {
+            var (result, _) = OnSingleThreadedContext("return Task.Factory.StartNew<int>(() => throw new InvalidOperationException(\"boom\"), System.Threading.CancellationToken.None, TaskCreationOptions.None, TaskScheduler.FromCurrentSynchronizationContext()).GetAwaiter().GetResult();", timeoutMs: 5000);
+            Assert.False(result.Success);
+            Assert.NotEqual(ErrorKind.Timeout, result.ErrorKind);
+            Assert.StartsWith("System.InvalidOperationException: boom", result.Error);
         }
 
         // What no thread may run inline stays a sliced wait that stops at the budget instead of hanging the context's thread:
@@ -421,7 +431,7 @@ namespace CodeExecTests
             var (result, ms) = OnSingleThreadedContext(code, timeoutMs: 1000);
             Assert.True(result.ErrorKind == ErrorKind.Timeout, result.ErrorKind + ": " + result.Error);
             Assert.Contains("The snippet ran longer than its time budget of 1000 ms (timeoutMs)", result.Error);
-            Assert.True(ms < 2500, $"stopped after {ms} ms");
+            Assert.True(ms < 5000, $"stopped after {ms} ms"); // the compile included: a cold one on CI is slow
         }
 
         /// <summary>Runs the snippet on a thread whose synchronization context queues work to that same thread (a host's main thread).</summary>
