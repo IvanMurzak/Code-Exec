@@ -1,4 +1,4 @@
-# Code-Exec contract (v0.3)
+# Code-Exec contract (v0.4)
 
 One request/response shape for every runtime (C# and Python) and every host (Unity, Godot, BRUTAL, Unreal, plain
 .NET). **This file is normative: a runtime that disagrees with it is the bug.** Behaviour changes start here, then
@@ -301,7 +301,7 @@ Lengths are in characters: UTF-16 code units in C#, code points in Python. A lim
 
 ## Changelog
 
-- **Unreleased** — execution guards (§3.6): C# snippets, full source and includes stop with `Runtime`
+- **v0.4.0** — execution guards (§3.6): C# snippets, full source and includes stop with `Runtime`
   (`Recursion too deep`) before a stack overflow and with `Timeout` once `timeoutMs` is spent, also in synchronous code
   on the main thread; Python stops with `Timeout` through a watchdog (§4). `timeoutMs` applies to both runtimes; `0`
   means the host's default (120000), a negative value is `InvalidRequest`. Full-source mode gets the request's `usings`
