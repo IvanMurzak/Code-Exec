@@ -80,7 +80,7 @@ namespace com.IvanMurzak.CodeExec
         /// 10 ms apart, back to every iteration when they are not: slow iterations overshoot the budget by about 20 ms,
         /// fast ones pay one clock read per 256 iterations. The statics are shared by all threads: a race only shifts a
         /// check. Work handed to a thread or task start (<see cref="Worker"/>, <see cref="TaskWorker"/>) carries its run: a
-        /// thread-static while it runs synchronously, an <c>AsyncLocal</c> for asynchronous task work (it flows into the
+        /// thread-local while it runs synchronously, an <c>AsyncLocal</c> for asynchronous task work (it flows into the
         /// work's awaits); the tasks and threads it starts in turn belong to the same run. Once a run that started work has
         /// ended, every clock check reads it, and work of an ended run stops there. A thread entry swallows the stop: an
         /// exception left unhandled on a thread would end the process.
@@ -94,8 +94,11 @@ internal static class __CodeExecGuard
     static Run _current;
     // The run of the work running: synchronous work on this thread, and asynchronous task work (it flows into the work's
     // awaits). Nothing else carries it: a timer, an async void continuation or a thread started by work keeps none of it.
-    [global::System.ThreadStatic] static Run _thread;
-    static readonly global::System.Threading.AsyncLocal<Run> _async = new global::System.Threading.AsyncLocal<Run>();
+    // Held by framework types instantiated over object, not by a thread-static or a generic instantiation over a type of
+    // this (collectible) assembly: with the thread-static, .NET 10 test runs crashed now and then in the GC (a null method
+    // table while it scanned for finalization), which points at what dead threads kept of an unloaded snippet's statics.
+    static readonly global::System.Threading.ThreadLocal<object> _thread = new global::System.Threading.ThreadLocal<object>();
+    static readonly global::System.Threading.AsyncLocal<object> _async = new global::System.Threading.AsyncLocal<object>();
 
     /// <summary>One run: whether it has ended, whether it started work, and how much of that work has not finished.</summary>
     public sealed class Run
@@ -141,7 +144,7 @@ internal static class __CodeExecGuard
     public static bool Running() => _stopped == 0 && (_orphans == 0 || (_live == 0 && _asyncOrphans == 0) || !Orphaned());
 
     // The AsyncLocal is slow to read: only once asynchronous task work has ever run.
-    static Run Current() => _thread ?? (_asyncWork != 0 ? _async.Value : null);
+    static Run Current() => (Run)_thread.Value ?? (_asyncWork != 0 ? (Run)_async.Value : null);
 
     static bool Orphaned()
     {
@@ -184,16 +187,16 @@ internal static class __CodeExecGuard
     static void Do(Run run, global::System.Action work, bool swallow)
     {
         Started();
-        var thread = _thread;
+        var thread = _thread.Value;
         var flowing = _asyncWork != 0 ? _async.Value : null;
-        _thread = run;
+        _thread.Value = run;
         if (flowing != null)
             _async.Value = null; // what the work starts without a wrapper (a timer, an async void continuation) is not the run's
         try { work(); }
         catch (global::System.Exception) when (swallow && !Running()) { }
         finally
         {
-            _thread = thread;
+            _thread.Value = thread;
             if (flowing != null)
                 _async.Value = flowing;
             Done(run);
@@ -214,9 +217,9 @@ internal static class __CodeExecGuard
         if (global::System.Threading.Volatile.Read(ref run.Ended) != 0)
             _asyncOrphans = 1;
         Started();
-        var thread = _thread;
+        var thread = _thread.Value;
         var flowing = _async.Value;
-        _thread = null;
+        _thread.Value = null;
         _async.Value = run;
         try
         {
@@ -235,7 +238,7 @@ internal static class __CodeExecGuard
         }
         finally
         {
-            _thread = thread;
+            _thread.Value = thread;
             _async.Value = flowing;
         }
     }
@@ -414,8 +417,8 @@ internal static class __CodeExecGuard
         public int Waiters, Owed;
     }
 
-    static readonly global::System.Runtime.CompilerServices.ConditionalWeakTable<object, Waiting> _waiting =
-        new global::System.Runtime.CompilerServices.ConditionalWeakTable<object, Waiting>();
+    static readonly global::System.Runtime.CompilerServices.ConditionalWeakTable<object, object> _waiting =
+        new global::System.Runtime.CompilerServices.ConditionalWeakTable<object, object>(); // over object: see _thread
 
     public static bool MonitorWait(object obj) => MonitorWait(obj, -1);
     public static bool MonitorWait(object obj, global::System.TimeSpan timeout) => MonitorWait(obj, Ms(timeout));
@@ -423,7 +426,7 @@ internal static class __CodeExecGuard
     {
         if (obj == null || !global::System.Threading.Monitor.IsEntered(obj))
             return global::System.Threading.Monitor.Wait(obj, millisecondsTimeout); // the framework's own exception
-        var waiting = _waiting.GetValue(obj, _ => new Waiting());
+        var waiting = (Waiting)_waiting.GetValue(obj, _ => new Waiting());
         waiting.Waiters++;
         try
         {
@@ -451,16 +454,16 @@ internal static class __CodeExecGuard
     public static void MonitorPulse(object obj)
     {
         global::System.Threading.Monitor.Pulse(obj); // throws, as written, when this thread does not hold the lock
-        Waiting waiting;
-        if (_waiting.TryGetValue(obj, out waiting) && waiting.Owed < waiting.Waiters)
+        object entry;
+        if (_waiting.TryGetValue(obj, out entry) && entry is Waiting waiting && waiting.Owed < waiting.Waiters)
             waiting.Owed++;
     }
 
     public static void MonitorPulseAll(object obj)
     {
         global::System.Threading.Monitor.PulseAll(obj);
-        Waiting waiting;
-        if (_waiting.TryGetValue(obj, out waiting))
+        object entry;
+        if (_waiting.TryGetValue(obj, out entry) && entry is Waiting waiting)
             waiting.Owed = waiting.Waiters;
     }
 
