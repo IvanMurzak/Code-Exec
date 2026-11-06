@@ -304,8 +304,10 @@ Lengths are in characters: UTF-16 code units in C#, code points in Python. A lim
 
 ## Changelog
 
-- **Unreleased** — C#: a `Monitor.Pulse` sent while a sliced `Monitor.Wait` is between two slices wakes it (it was
-  lost, and the waiter slept until the budget); the agent's `Monitor.Pulse` / `PulseAll` become guard stand-ins (§3.6).
+- **v0.4.1** — C#: the guard keeps its per-thread state in a `ThreadLocal` instead of a `[ThreadStatic]` field of
+  the collectible snippet assembly (a rare process crash in the .NET 10 GC went away with it); a `Monitor.Pulse` sent
+  while a sliced `Monitor.Wait` is between two slices wakes it (it was lost, and the waiter slept until the budget);
+  the agent's `Monitor.Pulse` / `PulseAll` become guard stand-ins (§3.6).
 - **v0.4.0** — execution guards (§3.6): C# snippets, full source and includes stop with `Runtime`
   (`Recursion too deep`) before a stack overflow and with `Timeout` once `timeoutMs` is spent, also in synchronous code
   on the main thread; Python stops with `Timeout` through a watchdog (§4). `timeoutMs` applies to both runtimes; `0`

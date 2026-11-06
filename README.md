@@ -87,8 +87,8 @@ released (Unity: ReflectorNet JSON).
 ### C# (NuGet)
 
 ```xml
-<PackageReference Include="com.IvanMurzak.CodeExec" Version="0.4.0" />
-<PackageReference Include="com.IvanMurzak.CodeExec.Roslyn" Version="0.4.0" />
+<PackageReference Include="com.IvanMurzak.CodeExec" Version="0.4.1" />
+<PackageReference Include="com.IvanMurzak.CodeExec.Roslyn" Version="0.4.1" />
 <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.8.0" />  <!-- your choice, 3.8+ -->
 ```
 
