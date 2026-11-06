@@ -573,6 +573,12 @@ namespace CodeExecTests
         [InlineData("Task.WaitAll(new[] { Task.Delay(10_000) }, 120)", "False")]
         [InlineData("System.Threading.WaitHandle.WaitAny(new System.Threading.WaitHandle[] { new System.Threading.ManualResetEvent(false) }, 120)", "258")]
         [InlineData("var o = new object();\nvar t = new System.Threading.Thread(() => { System.Threading.Thread.Sleep(200); lock (o) System.Threading.Monitor.Pulse(o); });\nbool got;\nlock (o) { t.Start(); got = System.Threading.Monitor.Wait(o); }\nt.Join();\ngot", "True")]
+        // A Pulse while a sliced waiter is between two slices (the pulsing thread holds the lock longer than a slice) still
+        // wakes it, and one Pulse wakes one waiter.
+        [InlineData("var o = new object();\nvar woken = 0;\nvar entered = new System.Threading.CountdownEvent(2);\nvar all = new System.Collections.Generic.List<System.Threading.Thread>();\nfor (var i = 0; i < 2; i++) { var t = new System.Threading.Thread(() => { lock (o) { entered.Signal(); if (System.Threading.Monitor.Wait(o, 2000)) woken++; } }); t.Start(); all.Add(t); }\nentered.Wait();\nlock (o) { System.Threading.Thread.Sleep(200); System.Threading.Monitor.Pulse(o); }\nforeach (var t in all) t.Join();\nwoken", "1")]
+        [InlineData("var o = new object();\nvar woken = 0;\nvar entered = new System.Threading.CountdownEvent(2);\nvar all = new System.Collections.Generic.List<System.Threading.Thread>();\nfor (var i = 0; i < 2; i++) { var t = new System.Threading.Thread(() => { lock (o) { entered.Signal(); if (System.Threading.Monitor.Wait(o, 2000)) woken++; } }); t.Start(); all.Add(t); }\nentered.Wait();\nlock (o) { System.Threading.Thread.Sleep(200); System.Threading.Monitor.PulseAll(o); }\nforeach (var t in all) t.Join();\nwoken", "2")]
+        [InlineData("var o = new object();\nvar woken = 0;\nvar entered = new System.Threading.CountdownEvent(3);\nvar all = new System.Collections.Generic.List<System.Threading.Thread>();\nfor (var i = 0; i < 3; i++) { var t = new System.Threading.Thread(() => { lock (o) { entered.Signal(); if (System.Threading.Monitor.Wait(o, 1500)) woken++; } }); t.Start(); all.Add(t); }\nentered.Wait();\nfor (var k = 0; k < 2; k++) { lock (o) { System.Threading.Thread.Sleep(70); System.Threading.Monitor.Pulse(o); } System.Threading.Thread.Sleep(30); }\nforeach (var t in all) t.Join();\nwoken", "2")]
+        [InlineData("try { System.Threading.Monitor.Pulse(new object()); } catch (System.Threading.SynchronizationLockException) { return \"sync\"; }\nreturn \"\";", "sync")]
         [InlineData("var e = new System.Threading.ManualResetEventSlim();\nTask.Run(() => { System.Threading.Thread.Sleep(150); e.Set(); });\ne.Wait();\ne.IsSet", "True")]
         [InlineData("Task.Run(async () => { await Task.Delay(150); return 4; }).GetAwaiter().GetResult()", "4")]
         [InlineData("try { Task.Run(() => { System.Threading.Thread.Sleep(100); throw new InvalidOperationException(\"r\"); return 1; }).GetAwaiter().GetResult(); } catch (InvalidOperationException e) { return e.Message; }\nreturn \"\";", "r")]
@@ -585,46 +591,6 @@ namespace CodeExecTests
             var result = await Fixtures.Runner().ExecuteAsync(new ExecuteRequest { Code = code });
             Assert.True(result.Success, result.Error + " " + string.Join(" | ", result.Diagnostics));
             Assert.Equal(expected, result.Value);
-        }
-
-        // A sliced Monitor.Wait leaves the wait queue each time a slice times out, until it holds the lock again: a Pulse in
-        // that gap must still wake it. Here the pulsing thread holds the lock for longer than a slice, so the waiter's slice
-        // always times out before the Pulse (without the pulse count the waiter sleeps until the budget).
-        [Theory]
-        [InlineData("System.Threading.Monitor.Pulse(o);", "1")]
-        [InlineData("System.Threading.Monitor.PulseAll(o);", "2")]
-        public void APulseBetweenTwoSlicesIsNotLost(string pulse, string woken)
-        {
-            var code = "var o = new object();\nvar woken = 0;\nvar entered = new System.Threading.CountdownEvent(2);\n"
-                + "System.Threading.Thread Waiter() { var t = new System.Threading.Thread(() => { lock (o) { entered.Signal(); if (System.Threading.Monitor.Wait(o, 3000)) woken++; } }); t.Start(); return t; }\n"
-                + "var a = Waiter();\nvar b = Waiter();\nentered.Wait();\n"
-                + "lock (o) { System.Threading.Thread.Sleep(200); " + pulse + " }\n"
-                + "a.Join();\nb.Join();\nwoken";
-            var result = Fixtures.Runner().Execute(new ExecuteRequest { Code = code, TimeoutMs = 20_000 });
-            Assert.True(result.Success, result.Error + " " + string.Join(" | ", result.Diagnostics));
-            Assert.Equal(woken, result.Value);
-        }
-
-        // One Pulse wakes exactly one sliced waiter, also when the others' slices time out around it.
-        [Fact]
-        public void OnePulseWakesOneWaiter()
-        {
-            const string code = "var o = new object();\nvar woken = 0;\nvar entered = new System.Threading.CountdownEvent(3);\n"
-                + "var threads = new System.Collections.Generic.List<System.Threading.Thread>();\n"
-                + "for (var i = 0; i < 3; i++) { var t = new System.Threading.Thread(() => { lock (o) { entered.Signal(); if (System.Threading.Monitor.Wait(o, 1500)) woken++; } }); t.Start(); threads.Add(t); }\n"
-                + "entered.Wait();\nfor (var k = 0; k < 2; k++) { lock (o) { System.Threading.Thread.Sleep(70); System.Threading.Monitor.Pulse(o); } System.Threading.Thread.Sleep(30); }\n"
-                + "foreach (var t in threads) t.Join();\nwoken";
-            var result = Fixtures.Runner().Execute(new ExecuteRequest { Code = code, TimeoutMs = 20_000 });
-            Assert.True(result.Success, result.Error + " " + string.Join(" | ", result.Diagnostics));
-            Assert.Equal("2", result.Value);
-        }
-
-        [Fact]
-        public void PulseWithoutTheLockStillThrows()
-        {
-            var result = Fixtures.Runner().Execute(new ExecuteRequest { Code = "try { System.Threading.Monitor.Pulse(new object()); } catch (System.Threading.SynchronizationLockException) { return \"sync\"; }\nreturn \"\";" });
-            Assert.True(result.Success, result.Error);
-            Assert.Equal("sync", result.Value);
         }
 
         // Inserted guard calls sit on lines of their own: the agent's lines AND columns stay.

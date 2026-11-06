@@ -155,10 +155,7 @@ the host turns them off (`CodeRunnerOptions.ExecutionGuards`):
   `SemaphoreSlim.Wait`, `ManualResetEventSlim.Wait`, `CountdownEvent.Wait`, `Monitor.Wait`, `WaitHandle.WaitOne` /
   `WaitAll` / `WaitAny`, in their forms without a timeout and with one (`int`, `TimeSpan`, with or without a
   `CancellationToken`; .NET 9+ `Task.WaitAll(IEnumerable<Task>)`), and `task.ConfigureAwait(b).GetAwaiter().GetResult()`.
-  Each becomes the guard's stand-in of the same parameters; values, exceptions, timeouts and wake-ups stay the same
-  (`Monitor.Pulse` / `PulseAll` in the agent's code become stand-ins too, so a pulse sent while a sliced `Monitor.Wait`
-  is between two slices still wakes it, and one `Pulse` wakes one such waiter; a `Monitor.Wait` on the same object
-  outside the agent's guarded code may then wake spuriously, and a pulse sent from such code can still be missed), a
+  Each becomes the guard's stand-in of the same parameters; values, exceptions, timeouts and wake-ups stay the same, a
   wait that succeeded is never followed by a stop (it may have acquired a semaphore or a mutex), and a wait of at most
   50 ms is the framework's own, as is a wait without bound where nothing could stop it (a run without budget, not work
   of a run). `Task.Wait` / `Task.WaitAll` without a timeout and without a cancelable token, `Result` and `GetResult`
@@ -167,7 +164,10 @@ the host turns them off (`CodeRunnerOptions.ExecutionGuards`):
   context's thread runs there and returns its value. A task the scheduler declines, one with no body to run (an async
   method's, whose continuation waits for the blocked thread), a wait on a thread-pool thread, and every wait on a
   runtime without the framework's inline path are waited for in slices and stop at the budget. A body run inline that
-  is not the snippet's own code is stopped only when it returns. Not covered (stopped
+  is not the snippet's own code is stopped only when it returns. `Monitor.Pulse` / `PulseAll` in the agent's code become
+  stand-ins too: a pulse sent while a sliced `Monitor.Wait` is between two slices still wakes it, and one `Pulse` wakes
+  one waiter (a pulse sent from code the guards do not rewrite can still be missed by a waiter between two slices).
+  Not covered (stopped
   only when the call returns): such a wait with named arguments, inside a conditional access (`a?.Task.Result`), as a
   property pattern path (`x is { Task.Result: 1 }`), through `base.`, a method group or a delegate; .NET 9+
   `Task.WaitAll` given a span; `lock` / `Monitor.Enter` and other waits (`BlockingCollection.Take`, `Barrier`,
