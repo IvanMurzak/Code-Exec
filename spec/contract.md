@@ -164,7 +164,10 @@ the host turns them off (`CodeRunnerOptions.ExecutionGuards`):
   context's thread runs there and returns its value. A task the scheduler declines, one with no body to run (an async
   method's, whose continuation waits for the blocked thread), a wait on a thread-pool thread, and every wait on a
   runtime without the framework's inline path are waited for in slices and stop at the budget. A body run inline that
-  is not the snippet's own code is stopped only when it returns. Not covered (stopped
+  is not the snippet's own code is stopped only when it returns. `Monitor.Pulse` / `PulseAll` in the agent's code become
+  stand-ins too: a pulse sent while a sliced `Monitor.Wait` is between two slices still wakes it, and one `Pulse` wakes
+  one waiter (a pulse sent from code the guards do not rewrite can still be missed by a waiter between two slices).
+  Not covered (stopped
   only when the call returns): such a wait with named arguments, inside a conditional access (`a?.Task.Result`), as a
   property pattern path (`x is { Task.Result: 1 }`), through `base.`, a method group or a delegate; .NET 9+
   `Task.WaitAll` given a span; `lock` / `Monitor.Enter` and other waits (`BlockingCollection.Take`, `Barrier`,
@@ -301,6 +304,8 @@ Lengths are in characters: UTF-16 code units in C#, code points in Python. A lim
 
 ## Changelog
 
+- **Unreleased** — C#: a `Monitor.Pulse` sent while a sliced `Monitor.Wait` is between two slices wakes it (it was
+  lost, and the waiter slept until the budget); the agent's `Monitor.Pulse` / `PulseAll` become guard stand-ins (§3.6).
 - **v0.4.0** — execution guards (§3.6): C# snippets, full source and includes stop with `Runtime`
   (`Recursion too deep`) before a stack overflow and with `Timeout` once `timeoutMs` is spent, also in synchronous code
   on the main thread; Python stops with `Timeout` through a watchdog (§4). `timeoutMs` applies to both runtimes; `0`
