@@ -605,6 +605,20 @@ namespace CodeExecTests
             Assert.Equal(woken, result.Value);
         }
 
+        // One Pulse wakes exactly one sliced waiter, also when the others' slices time out around it.
+        [Fact]
+        public void OnePulseWakesOneWaiter()
+        {
+            const string code = "var o = new object();\nvar woken = 0;\nvar entered = new System.Threading.CountdownEvent(3);\n"
+                + "var threads = new System.Collections.Generic.List<System.Threading.Thread>();\n"
+                + "for (var i = 0; i < 3; i++) { var t = new System.Threading.Thread(() => { lock (o) { entered.Signal(); if (System.Threading.Monitor.Wait(o, 1500)) woken++; } }); t.Start(); threads.Add(t); }\n"
+                + "entered.Wait();\nfor (var k = 0; k < 2; k++) { lock (o) { System.Threading.Thread.Sleep(70); System.Threading.Monitor.Pulse(o); } System.Threading.Thread.Sleep(30); }\n"
+                + "foreach (var t in threads) t.Join();\nwoken";
+            var result = Fixtures.Runner().Execute(new ExecuteRequest { Code = code, TimeoutMs = 20_000 });
+            Assert.True(result.Success, result.Error + " " + string.Join(" | ", result.Diagnostics));
+            Assert.Equal("2", result.Value);
+        }
+
         [Fact]
         public void PulseWithoutTheLockStillThrows()
         {
