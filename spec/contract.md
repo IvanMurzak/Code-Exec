@@ -155,7 +155,9 @@ the host turns them off (`CodeRunnerOptions.ExecutionGuards`):
   `SemaphoreSlim.Wait`, `ManualResetEventSlim.Wait`, `CountdownEvent.Wait`, `Monitor.Wait`, `WaitHandle.WaitOne` /
   `WaitAll` / `WaitAny`, in their forms without a timeout and with one (`int`, `TimeSpan`, with or without a
   `CancellationToken`; .NET 9+ `Task.WaitAll(IEnumerable<Task>)`), and `task.ConfigureAwait(b).GetAwaiter().GetResult()`.
-  Each becomes the guard's stand-in of the same parameters; values, exceptions, timeouts and wake-ups stay the same, a
+  Each becomes the guard's stand-in of the same parameters; values, exceptions, timeouts and wake-ups stay the same
+  (`Monitor.Pulse` / `PulseAll` in the agent's code become stand-ins too, so a pulse sent while a sliced `Monitor.Wait`
+  is between two slices still wakes it; two waiters can then both wake from one `Pulse`, as from a spurious wake-up), a
   wait that succeeded is never followed by a stop (it may have acquired a semaphore or a mutex), and a wait of at most
   50 ms is the framework's own, as is a wait without bound where nothing could stop it (a run without budget, not work
   of a run). `Task.Wait` / `Task.WaitAll` without a timeout and without a cancelable token, `Result` and `GetResult`

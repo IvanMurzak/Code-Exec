@@ -587,6 +587,32 @@ namespace CodeExecTests
             Assert.Equal(expected, result.Value);
         }
 
+        // A sliced Monitor.Wait leaves the wait queue each time a slice times out, until it holds the lock again: a Pulse in
+        // that gap must still wake it. Here the pulsing thread holds the lock for longer than a slice, so the waiter's slice
+        // always times out before the Pulse (without the pulse count the waiter sleeps until the budget).
+        [Theory]
+        [InlineData("System.Threading.Monitor.Pulse(o);", "1")]
+        [InlineData("System.Threading.Monitor.PulseAll(o);", "2")]
+        public void APulseBetweenTwoSlicesIsNotLost(string pulse, string woken)
+        {
+            var code = "var o = new object();\nvar woken = 0;\nvar entered = new System.Threading.CountdownEvent(2);\n"
+                + "System.Threading.Thread Waiter() { var t = new System.Threading.Thread(() => { lock (o) { entered.Signal(); if (System.Threading.Monitor.Wait(o, 3000)) woken++; } }); t.Start(); return t; }\n"
+                + "var a = Waiter();\nvar b = Waiter();\nentered.Wait();\n"
+                + "lock (o) { System.Threading.Thread.Sleep(200); " + pulse + " }\n"
+                + "a.Join();\nb.Join();\nwoken";
+            var result = Fixtures.Runner().Execute(new ExecuteRequest { Code = code, TimeoutMs = 20_000 });
+            Assert.True(result.Success, result.Error + " " + string.Join(" | ", result.Diagnostics));
+            Assert.Equal(woken, result.Value);
+        }
+
+        [Fact]
+        public void PulseWithoutTheLockStillThrows()
+        {
+            var result = Fixtures.Runner().Execute(new ExecuteRequest { Code = "try { System.Threading.Monitor.Pulse(new object()); } catch (System.Threading.SynchronizationLockException) { return \"sync\"; }\nreturn \"\";" });
+            Assert.True(result.Success, result.Error);
+            Assert.Equal("sync", result.Value);
+        }
+
         // Inserted guard calls sit on lines of their own: the agent's lines AND columns stay.
         [Theory]
         [InlineData("while (false) { } int x = undefinedThing;", 1, 27)]

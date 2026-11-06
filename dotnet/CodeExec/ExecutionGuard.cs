@@ -406,10 +406,63 @@ internal static class __CodeExecGuard
     public static bool CountdownWait(global::System.Threading.CountdownEvent waitable, global::System.TimeSpan timeout, global::System.Threading.CancellationToken cancellationToken) => CountdownWait(waitable, Ms(timeout), cancellationToken);
     public static bool CountdownWait(global::System.Threading.CountdownEvent waitable, int millisecondsTimeout, global::System.Threading.CancellationToken cancellationToken) => Sliced(millisecondsTimeout, ms => waitable.Wait(ms, cancellationToken));
 
-    // Waiting again after a slice misses no Pulse: the lock is held again between two slices.
-    public static bool MonitorWait(object obj) => Sliced(-1, ms => global::System.Threading.Monitor.Wait(obj, ms));
-    public static bool MonitorWait(object obj, int millisecondsTimeout) => Sliced(millisecondsTimeout, ms => global::System.Threading.Monitor.Wait(obj, ms));
-    public static bool MonitorWait(object obj, global::System.TimeSpan timeout) => Sliced(Ms(timeout), ms => global::System.Threading.Monitor.Wait(obj, ms));
+    // A slice that times out leaves the wait queue until it holds the lock again: a Pulse in that gap would be lost (the
+    // pulsing thread may take the lock first). So the agent's Pulse / PulseAll also count what they owe the sliced waiters
+    // of that object (all under its lock), and a waiter between two slices takes what it is owed as its wake-up.
+    sealed class Waiting
+    {
+        public int Waiters, Owed;
+    }
+
+    static readonly global::System.Runtime.CompilerServices.ConditionalWeakTable<object, Waiting> _waiting =
+        new global::System.Runtime.CompilerServices.ConditionalWeakTable<object, Waiting>();
+
+    public static bool MonitorWait(object obj) => MonitorWait(obj, -1);
+    public static bool MonitorWait(object obj, global::System.TimeSpan timeout) => MonitorWait(obj, Ms(timeout));
+    public static bool MonitorWait(object obj, int millisecondsTimeout)
+    {
+        if (obj == null || !global::System.Threading.Monitor.IsEntered(obj))
+            return global::System.Threading.Monitor.Wait(obj, millisecondsTimeout); // the framework's own exception
+        var waiting = _waiting.GetValue(obj, _ => new Waiting());
+        waiting.Waiters++;
+        try
+        {
+            return Sliced(millisecondsTimeout, ms =>
+            {
+                var pulsed = global::System.Threading.Monitor.Wait(obj, ms);
+                if (waiting.Owed > 0)
+                {
+                    waiting.Owed--;
+                    return true; // pulsed in the queue, or between two slices
+                }
+                return pulsed;
+            });
+        }
+        finally
+        {
+            // Whatever ends the wait, the lock is held again here.
+            if (--waiting.Waiters == 0)
+                _waiting.Remove(obj); // no entry outlives the wait: it would keep the snippet's code loaded
+            else if (waiting.Owed > waiting.Waiters)
+                waiting.Owed = waiting.Waiters;
+        }
+    }
+
+    public static void MonitorPulse(object obj)
+    {
+        global::System.Threading.Monitor.Pulse(obj); // throws, as written, when this thread does not hold the lock
+        Waiting waiting;
+        if (_waiting.TryGetValue(obj, out waiting) && waiting.Owed < waiting.Waiters)
+            waiting.Owed++;
+    }
+
+    public static void MonitorPulseAll(object obj)
+    {
+        global::System.Threading.Monitor.PulseAll(obj);
+        Waiting waiting;
+        if (_waiting.TryGetValue(obj, out waiting))
+            waiting.Owed = waiting.Waiters;
+    }
 
     public static bool WaitOne(global::System.Threading.WaitHandle handle) => Sliced(-1, ms => handle.WaitOne(ms));
     public static bool WaitOne(global::System.Threading.WaitHandle handle, int millisecondsTimeout) => Sliced(millisecondsTimeout, ms => handle.WaitOne(ms));

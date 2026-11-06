@@ -265,6 +265,9 @@ namespace com.IvanMurzak.CodeExec.Roslyn
             foreach (var pair in new[] { new[] { "SemaphoreSlim", "SemaphoreWait" }, new[] { "ManualResetEventSlim", "EventWait" }, new[] { "CountdownEvent", "CountdownWait" } })
                 Add("System.Threading." + pair[0], "Wait", pair[1], none, new[] { Ms }, new[] { Span }, new[] { Token }, new[] { Ms, Token }, new[] { Span, Token });
             Add("System.Threading.Monitor", "Wait", "MonitorWait", new[] { "object" }, new[] { "object", Ms }, new[] { "object", Span });
+            // Not waits, but the sliced Monitor.Wait needs them: a pulse while its waiter is between two slices is not lost.
+            Add("System.Threading.Monitor", "Pulse", "MonitorPulse", new[] { "object" });
+            Add("System.Threading.Monitor", "PulseAll", "MonitorPulseAll", new[] { "object" });
             Add("System.Threading.WaitHandle", "WaitOne", "WaitOne", none, new[] { Ms }, new[] { Span });
             Add("System.Threading.WaitHandle", "WaitAll", "WaitAll", new[] { HandleArray }, new[] { HandleArray, Ms }, new[] { HandleArray, Span });
             Add("System.Threading.WaitHandle", "WaitAny", "WaitAny", new[] { HandleArray }, new[] { HandleArray, Ms }, new[] { HandleArray, Span });
