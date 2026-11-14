@@ -22,8 +22,13 @@ Unity, Godot, Unreal, MCP, ReflectorNet or any hosted service — hosts plug in 
    Every new Roslyn API needs a check that it exists in 3.8.
 4. The value converter runs before an unloadable snippet is released; nothing of the snippet's own types may escape.
 5. Python stays standard-library-only and Python 3.10 compatible (Unreal bundles 3.11).
-6. Publishing: only `com.IvanMurzak.CodeExec` and `com.IvanMurzak.CodeExec.Roslyn` to NuGet, only by dispatching
-   `.github/workflows/release.yml` (Trusted Publishing, no API key), only when the owner asks. No other publishing.
+6. Publishing: only `com.IvanMurzak.CodeExec` and `com.IvanMurzak.CodeExec.Roslyn` to NuGet, and only through the
+   workspace release train (`python .scripts/chain.py train create|review|release` in ai-game-dev-software, node
+   `code-exec`), which bumps the version, re-pins Godot-MCP and Brutal-MCP, re-vendors the sources into Unity-MCP and
+   Unreal-MCP, and dispatches `.github/workflows/release.yml` (Trusted Publishing, no API key). Never dispatch it with
+   `dry_run=false` by hand: a manual release leaves the consumers on the old version. No other publishing.
+7. `.github/scripts/chain_feed.py` is vendored from ai-game-dev-software (`chain.py feed vendor`): never edit it here.
+   `ci.yml`'s `package` job is this repo's chain leg; `scripts/pack.sh <dir> -p:Version=<v>` packs at a given version.
 
 ## Commands
 - Everything: `scripts/test-all.sh` (`ROSLYN_VERSIONS="3.8.0 5.9.0"` for several Roslyn lines).

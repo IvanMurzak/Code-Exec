@@ -22,6 +22,17 @@ with open(os.path.join(ROOT, "fixtures", "golden", "python.json"), encoding="utf
 INCLUDE_ROOT = os.path.join(ROOT, GOLDEN["includeRoot"])
 
 
+class VersionTests(unittest.TestCase):
+    def test_the_python_version_is_the_package_version(self):
+        """One version for the whole release: the release train bumps dotnet/Directory.Build.props and this
+        `__version__` together (its `lockstep`), and Unreal-MCP vendors this file."""
+        import re
+
+        with open(os.path.join(ROOT, "dotnet", "Directory.Build.props"), encoding="utf-8") as handle:
+            props = re.search(r"<Version>\s*([^<\s]+)\s*</Version>", handle.read()).group(1)
+        self.assertEqual(code_exec.__version__, props)
+
+
 class GoldenTests(unittest.TestCase):
     def test_golden(self):
         for case in GOLDEN["cases"]:

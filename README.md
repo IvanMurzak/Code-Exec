@@ -200,7 +200,7 @@ scripts/pack.sh                                      # pack + package shape chec
 python3 scripts/readme-assets.py                     # regenerate the README art in docs/assets/
 ```
 
-Releases: [`.github/workflows/release.yml`](.github/workflows/release.yml), dispatch only.
+Releases: [`.github/workflows/release.yml`](.github/workflows/release.yml), dispatched only by the ai-game-dev release train.
 
 ## Documentation
 
