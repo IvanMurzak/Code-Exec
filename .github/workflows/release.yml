@@ -1,13 +1,15 @@
 name: Release
 
-# Releases ONLY by a manual dispatch (as RQL / ReflectorNet / McpPlugin). Merging a version bump to `main` publishes nothing.
+# Releases ONLY through the workspace release train (`python .scripts/chain.py train release` in ai-game-dev-software,
+# node `code-exec`), which dispatches this workflow on main like every other internal package, after bumping the
+# version and moving every consumer (Godot-MCP and Brutal-MCP pins, the sources Unity-MCP and Unreal-MCP vendor).
+# Never dispatch it with dry_run=false by hand. Merging a version bump to `main` publishes nothing.
 # Order: guard -> pack + package checks + version checks -> full test suite -> NuGet publish of BOTH packages (Trusted
 # Publishing) -> verify both are live -> tag nuget-v<version> + GitHub Release. The tag is created only after the
 # packages are live, so re-dispatching the same commit after a failed publish / verify is always possible
 # (--skip-duplicate); a version already live from another commit fails the run.
 #
-#   gh workflow run release.yml -R IvanMurzak/Code-Exec --ref main -f dry_run=true
-#   gh workflow run release.yml -R IvanMurzak/Code-Exec --ref main -f dry_run=false
+#   gh workflow run release.yml -R IvanMurzak/Code-Exec --ref main -f dry_run=true    # a rehearsal; publishes nothing
 #
 # NuGet Trusted Publishing: nuget.org account IvanMurzak needs a policy for repository IvanMurzak/Code-Exec, workflow
 # release.yml, covering com.IvanMurzak.CodeExec and com.IvanMurzak.CodeExec.Roslyn.

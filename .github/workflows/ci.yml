@@ -4,10 +4,26 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Chain leg contract (ai-game-dev-software `.scripts/chain/leg/chain_feed.py` §C1-C5, node `code-exec`):
+  # a release-train / chain run dispatches this workflow with the lock; on every other event each chain step is a
+  # no-op. A plain dispatch (no lock) still runs the whole CI.
   workflow_dispatch:
+    inputs:
+      lock:
+        description: the chain lock JSON (<= 60000 characters)
+        required: false
+        default: ""
+        type: string
+      lock_hash8:
+        description: first 8 hex characters of the lock hash
+        required: false
+        default: ""
+        type: string
+
+run-name: ${{ github.event_name == 'workflow_dispatch' && inputs.lock_hash8 != '' && format('chain {0} code-exec', inputs.lock_hash8) || '' }}
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ${{ github.event_name == 'workflow_dispatch' && inputs.lock_hash8 != '' && format('chain-{0}-{1}', inputs.lock_hash8, github.workflow) || format('ci-{0}', github.ref) }}
   cancel-in-progress: false
 
 permissions:
@@ -16,6 +32,8 @@ permissions:
 env:
   DOTNET_CLI_TELEMETRY_OPTOUT: "1"
   DOTNET_NOLOGO: "1"
+  CHAIN_LOCK: ${{ inputs.lock }}
+  CHAIN_LOCK_HASH8: ${{ inputs.lock_hash8 }}
 
 jobs:
   # The adapter ships as SOURCE and compiles against the consumer's Roslyn: test the same source on every
@@ -57,6 +75,9 @@ jobs:
       - name: Test (net48)
         run: dotnet test dotnet/CodeExec.Tests/CodeExec.Tests.csproj -c Release -f net48 -p:IncludeNetFx=true -p:RoslynVersion=${{ matrix.roslyn }}
 
+  # The chain leg (manifest `legs:` of node `code-exec`): on a chain dispatch this job also packs both packages at the
+  # lock's ws version into .artifacts/nuget, where `record` proves them (the Core's assembly ProductVersion, the
+  # source-only adapter's nuspec version). Consumer legs self-build Code-Exec from the lock sha; nothing is uploaded.
   package:
     name: pack + strict consumer
     runs-on: ubuntu-latest
@@ -68,6 +89,23 @@ jobs:
           dotnet-version: |
             8.0.x
             10.0.x
+      - name: chain python (posix)
+        if: always() && env.CHAIN_PY == ''
+        shell: bash
+        run: |
+          for c in python3 python; do
+            exe="$("$c" -c 'import sys, select, socket, ssl, zlib, ctypes, hashlib; sys.version_info >= (3, 9) or sys.exit(1); print(sys.executable.replace(chr(92), chr(47)))' 2>/dev/null)" || continue
+            case "$exe" in /*) ;; *) continue ;; esac
+            case "$exe" in *[[:space:]]*) continue ;; esac
+            [ -f "$exe" ] && [ -x "$exe" ] || continue
+            echo "CHAIN_PY=$exe" >> "$GITHUB_ENV"; exit 0
+          done
+          echo 'chain: no Python 3.9+ on PATH that runs and reports an absolute, space-free sys.executable (tried python3, python)' >&2; exit 2
+      # Chain feed (§C4): asserts this run is at the lock's sha and exports CHAIN_BUILD_PROPS (-p:Version=<ws>) +
+      # CHAIN_WS_VERSION + CHAIN_ACTIVE. Code-Exec is a root: no lower layers to build.
+      - name: chain feed
+        id: chain
+        run: ${{ env.CHAIN_PY }} .github/scripts/chain_feed.py apply --node code-exec --job package
       - name: Pack and check the packages' shape
         run: scripts/pack.sh packages
       - name: "Compile Core + adapter as source (C# 9, netstandard2.0, as Unity vendors them)"
@@ -77,6 +115,19 @@ jobs:
           done
       - name: Consume the packages (Roslyn 3.8.0 and 5.9.0)
         run: scripts/consume.sh 3.8.0 5.9.0
+      - name: Pack at the lock's ws version (chain)
+        if: env.CHAIN_ACTIVE == '1'
+        run: scripts/pack.sh .artifacts/nuget ${{ env.CHAIN_BUILD_PROPS }}
+      - name: chain leg record
+        id: chain_record
+        if: always()
+        run: ${{ env.CHAIN_PY }} .github/scripts/chain_feed.py record --node code-exec --job package --job-status ${{ job.status }} --out chain-leg.json
+      - name: chain leg artifact
+        if: always() && steps.chain_record.outputs.artifact_name != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.chain_record.outputs.artifact_name }}
+          path: chain-leg.json
 
   python:
     name: python ${{ matrix.python }}

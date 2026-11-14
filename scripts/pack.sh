@@ -1,13 +1,19 @@
 #!/usr/bin/env bash
 # Packs com.IvanMurzak.CodeExec + com.IvanMurzak.CodeExec.Roslyn into $1 (default: ./packages) and checks the
 # source-only package's shape. Prints the version on stdout. Publishes nothing.
+#   scripts/pack.sh [out-dir] [msbuild args...]   e.g. -p:Version=0.4.1-ws.g0123abcd (a release-train chain leg)
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 out="${1:-$root/packages}"
+[ $# -gt 0 ] && shift
+props=("$@")
 mkdir -p "$out"
-dotnet pack "$root/dotnet/CodeExec/CodeExec.csproj" -c Release -o "$out" >&2
-dotnet pack "$root/dotnet/CodeExec.Roslyn/CodeExec.Roslyn.csproj" -c Release -o "$out" >&2
+dotnet pack "$root/dotnet/CodeExec/CodeExec.csproj" -c Release -o "$out" ${props[@]+"${props[@]}"} >&2
+dotnet pack "$root/dotnet/CodeExec.Roslyn/CodeExec.Roslyn.csproj" -c Release -o "$out" ${props[@]+"${props[@]}"} >&2
 version="$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' "$root/dotnet/Directory.Build.props")"
+for arg in ${props[@]+"${props[@]}"}; do
+  case "$arg" in -p:Version=*) version="${arg#-p:Version=}" ;; esac
+done
 roslyn="$out/com.IvanMurzak.CodeExec.Roslyn.$version.nupkg"
 listing="$(unzip -l "$roslyn")"
 for f in src/RoslynCSharpCompiler.cs src/SnippetWriter.cs src/GuardWriter.cs build/com.IvanMurzak.CodeExec.Roslyn.props LICENSE.md; do
