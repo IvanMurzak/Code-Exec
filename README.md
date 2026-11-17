@@ -101,7 +101,7 @@ var runner = new CodeRunner(new RoslynCSharpCompiler(), new CodeRunnerOptions
 ExecuteResult result = await runner.ExecuteAsync(new ExecuteRequest { Code = "Application.unityVersion" });
 ```
 
-`com.IvanMurzak.CodeExec` targets `netstandard2.0` (Unity / Mono, .NET Framework) and `net8.0`.
+`com.IvanMurzak.CodeExec` targets `netstandard2.0` (Unity / Mono, .NET Framework), `net8.0` and `net10.0`.
 `com.IvanMurzak.CodeExec.Roslyn` is source-only: it compiles inside your project against **your**
 `Microsoft.CodeAnalysis.CSharp`.
 

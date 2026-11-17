@@ -6,7 +6,7 @@ Unity, Godot, Unreal, MCP, ReflectorNet or any hosted service — hosts plug in 
 ## Layout
 - `spec/contract.md` — normative request/response and snippet semantics. **The contract wins over any runtime.**
 - `fixtures/golden/` — shared cases (`csharp.json`, `python.json`); `fixtures/include/` — include trees they use.
-- `dotnet/CodeExec/` — Core (`netstandard2.0` + `net8.0`), **no package dependencies**.
+- `dotnet/CodeExec/` — Core (`netstandard2.0` + `net8.0` + `net10.0`), **no package dependencies**.
 - `dotnet/CodeExec.Roslyn/src/` — the Roslyn adapter, shipped as **source** (package `com.IvanMurzak.CodeExec.Roslyn`).
 - `dotnet/CodeExec.Tests/` — xUnit; compiles the adapter source like a consumer, against `-p:RoslynVersion=…`.
 - `dotnet/samples/PackageConsumer/` — consumes the packed packages with strict settings (nullable off, C# 9).
