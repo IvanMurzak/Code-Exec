@@ -7,7 +7,7 @@ the snippet's own lines.
 Two packages:
 
 - **`com.IvanMurzak.CodeExec`** — the runtime. No dependencies. `netstandard2.0` (Unity / Mono, .NET Framework) and
-  `net8.0` (each run in its own collectible `AssemblyLoadContext`, unloaded afterwards).
+  `net8.0` / `net10.0` (each run in its own collectible `AssemblyLoadContext`, unloaded afterwards).
 - **`com.IvanMurzak.CodeExec.Roslyn`** — source-only: the compiler adapter compiles inside your project against **your**
   `Microsoft.CodeAnalysis.CSharp` (3.8 or newer). Add that package yourself.
 
