@@ -3,7 +3,7 @@
     Core of Code-Exec. Deliberately has NO package dependencies — Roslyn included. The compiler is plugged in through
     ICSharpCompiler, implemented by the source-only package com.IvanMurzak.CodeExec.Roslyn, which compiles inside the
     consumer against the consumer's own Microsoft.CodeAnalysis.CSharp.
-    netstandard2.0 serves Unity (Mono) and .NET Framework; net8.0 and net10.0 add the collectible AssemblyLoadContext host.
+    netstandard2.0 serves Unity (Mono) and .NET Framework; net8.0+ adds the collectible AssemblyLoadContext host.
   -->
   <PropertyGroup>
     <TargetFrameworks>netstandard2.0;net8.0;net10.0</TargetFrameworks>
